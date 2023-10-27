@@ -15,3 +15,6 @@ In your Python environment:
 ```bash
 pip install -r requirements.txt
 ```
+
+## Updates
+- Currently, data generation implementation in Torch is under development in the `datagen` branch. This will eventually replace all the NumPy functions for data generation, which is noticeably slow.
