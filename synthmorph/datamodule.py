@@ -219,12 +219,14 @@ def minmax_norm(x, axis=None):
     return np.divide(x - x_min, x_max - x_min, out=np.zeros_like(x), where=(x_max - x_min) != 0)
 
 
-def conform(x, in_shape):
-    x = np.float32(x)
-    x = np.squeeze(x)
+def conform(x, in_shape, device):
+    x = x.astype(np.float32)
+    x = x.squeeze()
     x = minmax_norm(x)
+    x = torch.from_numpy(x)
     x = resize(x, zoom_factor=[o / i for o, i in zip(in_shape, x.shape)])
-    return np.expand_dims(x, axis=(0, -1))
+    x = x.view(1, *in_shape, 1)
+    return x.to(device)
 
 
 def post_predict(x):

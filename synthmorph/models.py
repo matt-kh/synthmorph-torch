@@ -17,7 +17,7 @@ class SynthMorph(pl.LightningModule):
         int_downsize=2,
         lmd=1,
         bidir=False,
-        model_weights=None
+        reg_weights=None
     ):
         super().__init__()
         dim = len(vol_size)
@@ -31,8 +31,8 @@ class SynthMorph(pl.LightningModule):
             bidir=bidir,
             unet_half_res=True,
         )
-        if model_weights is not None:
-            self.reg_model.load_state_dict(torch.load(model_weights))   # .pth file
+        if reg_weights is not None:
+            self.reg_model.load_state_dict(torch.load(reg_weights))   # .pth file
 
         self.dice_loss = Dice()
         self.l2_loss = Grad(penalty='l2', loss_mult=lmd)
@@ -76,8 +76,6 @@ class SynthMorph(pl.LightningModule):
     
     
     def predict_step(self, moving, fixed):
-        moving, fixed = torch.from_numpy(moving), torch.from_numpy(fixed)
-        moving, fixed = moving.to('cuda'), fixed.to('cuda')  # temporary fix
         fixed = fixed.permute(0, 3, 1, 2)
         moving = moving.permute(0, 3, 1, 2)
         results = self.reg_model(moving, fixed, True)
