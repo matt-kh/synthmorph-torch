@@ -1,4 +1,6 @@
 # Models and artifacts
+data/
+lightning_logs/
 models/
 weigths/
 artifacts/
