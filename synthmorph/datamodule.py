@@ -7,6 +7,9 @@ from scipy.ndimage.filters import gaussian_filter
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
+# local code
+from .utils import resize
+
 def draw_perlin(out_shape: List[int] = [256, 256, 16],
                    scales: List[int] = [32, 64],
                    min_std=0,
@@ -220,7 +223,7 @@ def conform(x, in_shape):
     x = np.float32(x)
     x = np.squeeze(x)
     x = minmax_norm(x)
-    x = cv2.resize(x, in_shape)
+    x = resize(x, zoom_factor=[o / i for o, i in zip(in_shape, x.shape)])
     return np.expand_dims(x, axis=(0, -1))
 
 
