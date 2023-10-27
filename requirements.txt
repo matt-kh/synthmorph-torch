@@ -1,0 +1,10 @@
+pytorch-lightning
+torchvision
+tensorflow[and-cuda]
+opencv-contrib-python
+matplotlib
+tqdm
+prettytable
+jupyter
+git+https://github.com/adalca/neurite.git
+git+https://github.com/voxelmorph/voxelmorph.git

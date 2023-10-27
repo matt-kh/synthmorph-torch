@@ -1,3 +1,11 @@
+# Models and artifacts
+models/
+weigths/
+artifacts/
+*.csv
+*.pth
+*.h5
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
