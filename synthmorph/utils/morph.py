@@ -2,11 +2,12 @@ import itertools
 import numpy as np
 import torch
 
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-def interpn(vol, loc, interp_method='linear', fill_value=None):
-    
+def interpn(vol, loc, interp_method='linear', fill_value=None, device=device):
+    vol = vol.to(device)
     if isinstance(loc, (list, tuple)):
-        loc = torch.stack(loc, dim=-1)
+        loc = torch.stack(loc, dim=-1).to(device)
     nb_dims = loc.shape[-1]
     input_vol_shape = vol.shape
 
