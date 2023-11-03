@@ -1,3 +1,4 @@
+import warnings
 from typing import List
 import torch
 import cv2
@@ -8,43 +9,60 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 
 # local code
-from synth_torch import draw_perlin as torch_draw_perlin
-from .utils import resize
+from . import utils
 
-def draw_perlin(out_shape: List[int] = [256, 256, 16],
-                   scales: List[int] = [32, 64],
-                   min_std=0,
-                   max_std=1,
-                   dtype=np.float32,
-                   seed=None):
-    """_summary_
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    Args:
-        out_shape (List[int], optional): _description_. Defaults to [256, 256, 16].
-        scales (List[int], optional): _description_. Defaults to [32, 64].
-        min_std (int, optional): _description_. Defaults to 0.
-        max_std (int, optional): _description_. Defaults to 1.
-        dtype (_type_, optional): _description_. Defaults to np.float32.
+def draw_perlin(out_shape,
+                scales,
+                min_std=0,
+                max_std=1,
+                modulate=None,
+                dtype=torch.float32,
+                seed=None,
+                device=device):
+    '''
+    Generate Perlin noise by drawing from Gaussian distributions at different
+    resolutions, upsampling and summing. 
 
-    Returns:
-        _type_: _description_
-    """
-    if seed is not None:
-        np.random.seed(seed)
+    Parameters:
+        out_shape: List defining the output shape. In N-dimensional space, it
+            should have N+1 elements, the last one being the feature dimension.
+        scales: List of relative resolutions at which noise is sampled normally.
+            A scale of 2 means half resolution relative to the output shape.
+        min_std: Minimum standard deviation (SD) for drawing noise volumes.
+        max_std: Maximum SD for drawing noise volumes.
+        modulate: Boolean. Whether the SD for each scale is drawn from [0, max_std].
+            The argument is deprecated: use min_std instead.
+        dtype: Output data type.
+        seed: Integer for reproducible randomization. This may only have an
+            effect if the function is wrapped in a Lambda layer.
+    '''
+    out_shape_np = np.asarray(out_shape, dtype=np.int32)
+    if isinstance(scales, (int)):
+        scales = [scales]
 
-    out_shape = np.array(out_shape, dtype=np.int32)
-    out = np.zeros(out_shape, dtype=dtype)
-
+    if not modulate:
+        min_std = max_std
+    if modulate is not None:
+        warnings.warn('Argument modulate to ne.utils.augment.draw_perlin is deprecated '
+                      'and will be removed in the future. Use min_std instead.')
+        
+    rand = np.random.default_rng(seed)
+    seed = lambda: rand.integers(np.iinfo(int).max).item()
+    rng = torch.Generator(device=device).manual_seed(seed())
+    
+    out = torch.zeros(out_shape, dtype=dtype, device=device)
     for scale in scales:
-        # assume last dimension = channel
-        sample_shape = np.ceil(out_shape[:-1] / scale)
-        sample_shape = np.int32([*sample_shape, out_shape[-1]])
+        sample_shape = np.ceil(out_shape_np[:-1] / scale)
+        sample_shape = np.int32((*sample_shape, out_shape_np[-1]))
 
+        std = torch.rand(size=(), dtype=dtype, generator=rng, device=device)
+        std = min_std + (max_std - min_std) * std
+        gauss = torch.empty(size=tuple(sample_shape), dtype=dtype, device=device).normal_(std=std, generator=rng)
 
-        std = np.random.uniform(min_std, max_std)
-        gauss = np.random.normal(0, std, sample_shape)
-
-        out += resize_np(gauss, out_shape)
+        zoom = [o / s for o, s in zip(out_shape, sample_shape)]
+        out += gauss if scale == 1 else utils.resize(gauss, zoom[:-1])
 
     return out
 
@@ -120,19 +138,21 @@ def transform(vol: np.ndarray,
 
 def generate_map(size: List[int] = [256, 256],
                  nLabel: int = 16,
-                 random=np.random.RandomState(None)):
+                 random=np.random.RandomState(None),
+                 device=device
+):
 
     seed1 = random.randint(0, 2**31 - 1)
     seed2 = random.randint(0, 2**31 - 1)
 
     num_dim = len(size)
-    out = draw_perlin([*size, nLabel], [32, 64], max_std=1, seed=seed1)
-    warp = draw_perlin([*size, nLabel, num_dim], [16, 32, 64], max_std=16, seed=seed2)
+    out = draw_perlin([*size, nLabel], [32, 64], max_std=1, seed=seed1, device=device)
+    warp = draw_perlin([*size, nLabel, num_dim], [16, 32, 64], max_std=16, seed=seed2, device=device)
 
-    deform = transform(out, warp)
+    deform = utils.transform(out, warp)
 
-    map = np.argmax(deform, axis=-1)
-    return np.uint8(map)
+    map = torch.argmax(deform, dim=-1)
+    return map.to(torch.uint8)
 
 
 def vec_intergral(vec: np.ndarray, nsteps=5):
@@ -183,7 +203,7 @@ def map_to_image(label_map: np.ndarray):
 
     # Intensity manipulation
     out = np.clip(out, 0, 255)
-    out = minmax_norm(out)
+    # out = minmax_norm(out)
     gamma = rand_gen.normal(loc=0.0, scale=0.25, size=out.shape)
     out = np.power(out, np.exp(gamma))
     out = np.expand_dims(out, -1)
@@ -236,7 +256,7 @@ def conform(x, in_shape, device):
     x = x.squeeze()
     x = torch.from_numpy(x)
     x = minmax_norm(x)
-    x = resize(x, zoom_factor=[o / i for o, i in zip(in_shape, x.shape)])
+    x = utils.resize(x, zoom_factor=[o / i for o, i in zip(in_shape, x.shape)])
     x = x.view(1, *in_shape, 1)
     return x.to(device)
 
