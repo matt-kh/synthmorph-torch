@@ -8,6 +8,7 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 
 # local code
+from synth_torch import draw_perlin as torch_draw_perlin
 from .utils import resize
 
 def draw_perlin(out_shape: List[int] = [256, 256, 16],
@@ -213,17 +214,28 @@ def minmax_norm(x, axis=None):
             exclude the respective dimensions.
     Returns:
         Normalized tensor.
-    """
-    x_min = np.min(x, axis=axis, keepdims=True)
-    x_max = np.max(x, axis=axis, keepdims=True)
-    return np.divide(x - x_min, x_max - x_min, out=np.zeros_like(x), where=(x_max - x_min) != 0)
+    """ 
+    
+    if axis == None:
+        # Treated as fattened, 1D tensor
+        torchmin = lambda x: torch.min(x)
+        torchmax = lambda x: torch.max(x)
+    else:
+        # Operates on specified axis, and maintain shape
+        torchmin = lambda x: torch.min(x, dim=axis, keepdim=True).values
+        torchmax = lambda x: torch.max(x, dim=axis, keepdim=True).values
+
+    x_min = torchmin(x)
+    x_max = torchmax(x)
+    result = torch.where((x_max - x_min) != 0, (x - x_min) / (x_max - x_min), torch.zeros_like(x))
+    return result
 
 
 def conform(x, in_shape, device):
     x = x.astype(np.float32)
     x = x.squeeze()
-    x = minmax_norm(x)
     x = torch.from_numpy(x)
+    x = minmax_norm(x)
     x = resize(x, zoom_factor=[o / i for o, i in zip(in_shape, x.shape)])
     x = x.view(1, *in_shape, 1)
     return x.to(device)
