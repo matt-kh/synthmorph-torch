@@ -6,7 +6,7 @@ import torch.nn as nn
 from . import utils
 
 
-class SpatialTransFormer(nn.Module):
+class SpatialTransformer(nn.Module):
     """
     ND spatial transformer layer
 
@@ -266,4 +266,101 @@ class RescaleTransform(nn.Module):
         out = out.permute(0, 3, 1, 2)   # convert back to torch format
 
         return out
+    
+class Resize(nn.Module):
+    """
+    N-D Resize Torch Layer
+    Note: this is not re-shaping an existing volume, but resizing, like scipy's "Zoom"
+
+    If you find this class useful, please cite the original paper this was written for:
+        Dalca AV, Guttag J, Sabuncu MR
+        Anatomical Priors in Convolutional Networks for Unsupervised Biomedical Segmentation, 
+        CVPR 2018. https://arxiv.org/abs/1903.03148
+    """
+
+    def __init__(self,
+                 zoom_factor,
+                 interp_method='linear',
+                 **kwargs):
+        """
+        Parameters: 
+            interp_method: 'linear' or 'nearest'
+                'xy' indexing will have the first two entries of the flow 
+                (along last axis) flipped compared to 'ij' indexing
+        """
+        self.zoom_factor = zoom_factor
+        self.interp_method = interp_method
+        self.ndims = None
+        self.inshape = None
+        self.built = False
+        super(self.__class__, self).__init__(**kwargs)
+    
+    def build(self, input_shape):
+        """
+        input_shape should be an element of list of one inputs:
+        input1: volume should be a *vol_shape x N
+        """
+        if self.built:
+            return
+        
+        if isinstance(input_shape[0], (list, tuple)) and len(input_shape) > 1:
+            raise Exception('Resize must be called on a list of length 1.')
+        
+        if isinstance(input_shape[0], (list, tuple)):
+            input_shape = input_shape[0]
+
+        # set up number of dimensions
+        self.ndims = len(input_shape) - 2
+        self.inshape = input_shape
+        if not isinstance(self.zoom_factor, (list, tuple)):
+            self.zoom_factor = [self.zoom_factor] * self.ndims
+        else:
+            assert len(self.zoom_factor) == self.ndims, \
+                'zoom factor length {} does not match number of dimensions {}'\
+                .format(len(self.zoom_factor), self.ndims)
+
+        # confirm built
+        self.built = True
+
+
+    def forward(self, inputs):
+        """
+        Parameters
+            inputs: volume of list with one volume
+        """
+        inputs = [torch.unsqueeze(i, 0) for i in inputs]
+        inputs = [i.permute(0, 2, 3, 1) for i in inputs]    # convert to tf format
+        input_shape = [i.shape for i in inputs]
+        self.build(input_shape)
+        
+        # check shapes
+        if isinstance(inputs, (list, tuple)):
+            assert len(inputs) == 1, "inputs has to be len 1. found: %d" % len(inputs)
+            vol = inputs[0]
+        else:
+            vol = inputs
+
+        # necessary for multi_gpu models...
+        vol = torch.reshape(vol, [-1, *self.inshape[1:]])
+
+        # map transform across batch
+        out = torch.stack([self._single_resize(t) for t in vol])
+        indices = list(range(len(out.shape)))
+        out = out = out.permute(0, -1, *indices[1:-1])
+        return out
+
+    def _single_resize(self, inputs):
+        return utils.resize(inputs, self.zoom_factor, interp_method=self.interp_method)
+    
+
+class RescaleValues(nn.Module):
+    """
+    A simple Torch layer to rescale data values by a fixed factor
+    """
+    def __init__(self, resize, **kwargs):
+        self.resize = resize
+        super(self.__class__, self).__init__(**kwargs)
+
+    def forward(self, x):
+        return x * self.resize
                                                     
