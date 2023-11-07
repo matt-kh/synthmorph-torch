@@ -262,7 +262,7 @@ class VxmDense(nn.Module):
             
         # configure transformer
         # self.transformer = layers.SpatialTransformer(inshape)
-        self.transformer = layers.SpatialTransFormer('linear', 'ij')
+        self.transformer = layers.SpatialTransformer('linear', 'ij')
 
         
     def forward(self, source, target, registration=False):

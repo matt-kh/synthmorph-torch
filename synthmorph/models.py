@@ -59,7 +59,7 @@ class SynthMorph(pl.LightningModule):
         results = self.reg_model(moving, fixed, False)
 
         y_source, y_target, flow = results['y_source'], results['y_target'], results['flow']
-        pred = layers.SpatialTransFormer('linear', 'ij', fill_value=0)([moving_map, flow])
+        pred = layers.SpatialTransformer('linear', 'ij', fill_value=0)([moving_map, flow])
         dice_loss = self.dice_loss.loss(fixed_map, pred) + 1.
         grad_loss = self.l2_loss.loss(None, flow)
         self.log_dict(
