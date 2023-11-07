@@ -1,6 +1,7 @@
 import itertools
 import numpy as np
 import torch
+import torch.nn.functional as nnf
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -80,10 +81,10 @@ def interpn(vol, loc, interp_method='linear', fill_value=None, device=device):
         assert interp_method == 'nearest', \
             'method should be linear or nearest, got: %s' % interp_method
         roundloc = loc.round().to(torch.int32)
-        roundloc = [roundloc[d, ...].clamp(0, max_loc[d]) for d in range(nb_dims)]
+        roundloc = [roundloc[..., d].clamp(0, max_loc[d]) for d in range(nb_dims)]
 
-        idx = sub2ind2d(vol_shape[2:], roundloc)
-        interp_vol = vol.view(-1, vol_shape[1]).gather(0, idx.unsqueeze(-1)).squeeze()
+        idx = sub2ind2d(vol_shape[:-1], roundloc)
+        interp_vol = vol.view(-1, vol_shape[-1])[idx]
 
     if fill_value is not None:
         out_type = interp_vol.dtype
@@ -119,7 +120,7 @@ def sub2ind2d(siz, subs, **kwargs):
 
 def prod_n(lst):
     """
-    Alternative to tf.stacking and prod, since tf.stacking can be slow
+    Alternative to torch.stacking and prod
     """
     prod = lst[0].clone()
     for p in lst[1:]:
@@ -304,7 +305,7 @@ def transform(vol, loc_shift, interp_method='linear',
     return interpn(vol, loc, interp_method=interp_method, fill_value=fill_value)
 
 
-def integrate_vec(vec, **kwargs):
+def integrate_vec(vec, nb_steps):
     """
     Integrate (stationary of time-dependent) vector field (N-D Tensor) in Torch.
     Currrently only supports scaling and squaring.
@@ -316,7 +317,6 @@ def integrate_vec(vec, **kwargs):
         int_vec: integral of vector field.
     """ 
 
-    nb_steps = kwargs['nb_steps']
     assert nb_steps >= 0, 'nb_steps should be >= 0, found: %d' % nb_steps
     vec = vec / (2**nb_steps)
     for _ in range(nb_steps):
