@@ -137,56 +137,6 @@ def post_predict(x):
     x = x.detach().numpy()
     return x
 
-
-class SynthMorphDataset(Dataset):
-    def __init__(
-        self,
-        size: int,
-        gen_arg: dict,
-        input_size=(256,256),
-        num_labels: int=26,
-        **kwargs
-
-    ):
-        super().__init__(**kwargs)
-        self.input_size = input_size
-        self.num_labels = num_labels
-        self.size = size
-        self.label_maps = [self._generate_label() for _ in tqdm(range(size))]
-        self.gen_arg = gen_arg
-
-    def _generate_label(self):
-        label_map = generate_map(
-                size=self.input_size,
-                nLabel=self.num_labels,
-            )
-
-        return label_map
-    
-    def prepare_data(self):
-        pass
-
-    def __len__(self):
-        return self.size
-
-    def __getitem__(self, index: int):
- 
-        label = self.label_maps[index]      
-
-        fixed = labels_to_image(label, **self.gen_arg)
-        moving = labels_to_image(label, **self.gen_arg)
-        fixed_image, fixed_map = fixed['image'], fixed['label']
-        moving_image, moving_map = moving['image'], moving['label']
-
-        results = {
-            "fixed": fixed_image.to(torch.float32),
-            "moving": moving_image.to(torch.float32),
-            "fixed_map": fixed_map.to(torch.int64),
-            "moving_map": moving_map.to(torch.int64)
-        }
-        
-        return results
-    
     
 def labels_to_image(
     labels,
@@ -441,3 +391,53 @@ def labels_to_image(
         outputs['def'] =  def_field
 
     return outputs
+
+
+class SynthMorphDataset(Dataset):
+    def __init__(
+        self,
+        size: int,
+        gen_arg: dict,
+        input_size=(256,256),
+        num_labels: int=26,
+        **kwargs
+
+    ):
+        super().__init__(**kwargs)
+        self.input_size = input_size
+        self.num_labels = num_labels
+        self.size = size
+        self.label_maps = [self._generate_label() for _ in tqdm(range(size))]
+        self.gen_arg = gen_arg
+
+    def _generate_label(self):
+        label_map = generate_map(
+                size=self.input_size,
+                nLabel=self.num_labels,
+            )
+
+        return label_map
+    
+    def prepare_data(self):
+        pass
+
+    def __len__(self):
+        return self.size
+
+    def __getitem__(self, index: int):
+ 
+        label = self.label_maps[index]      
+
+        fixed = labels_to_image(label, **self.gen_arg)
+        moving = labels_to_image(label, **self.gen_arg)
+        fixed_image, fixed_map = fixed['image'], fixed['label']
+        moving_image, moving_map = moving['image'], moving['label']
+
+        results = {
+            "fixed": fixed_image.to(torch.float32),
+            "moving": moving_image.to(torch.float32),
+            "fixed_map": fixed_map.to(torch.int64),
+            "moving_map": moving_map.to(torch.int64)
+        }
+        
+        return results
