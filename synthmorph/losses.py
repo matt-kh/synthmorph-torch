@@ -10,7 +10,9 @@ class Grad:
         self.loss_mult = loss_mult
 
     def _diffs(self, y):
-        vol_shape = [n for n in y.shape][2:]
+        y_indices = list(range(len(y.shape)))
+        y = y.permute(0, *y_indices[2:], 1) # to TF format
+        vol_shape = list(y.shape)[1:-1]
         ndims = len(vol_shape)
 
         df = [None] * ndims
@@ -51,10 +53,20 @@ class Dice:
     """
 
     def loss(self, y_true, y_pred):
-        ndims = len(list(y_pred.size())) - 2
+        ndims = len(list(y_pred.shape)) - 2
         vol_axes = list(range(2, ndims + 2))
-        # num_labels = y_true.shape[1]
         top = 2 * (y_true * y_pred).sum(dim=vol_axes)
-        bottom = torch.clamp((y_true + y_pred).sum(dim=vol_axes), min=1e-5)
-        dice = torch.mean(top / bottom)
+        bottom = (y_true + y_pred).sum(dim=vol_axes)
+        dice = divide_no_nan(top, bottom)
+        dice = torch.mean(dice)
         return -dice
+
+
+def divide_no_nan(x, y):
+    # Create a mask to handle division by zero or NaN in y
+    mask = (y != 0) & ~torch.isnan(y)
+    
+    # Perform the division only where the mask is True
+    result = torch.where(mask, x / y, torch.zeros_like(x))
+    
+    return result
