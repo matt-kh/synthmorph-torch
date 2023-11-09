@@ -1,6 +1,5 @@
 import pytorch_lightning as pl
 import torch
-
 # local code
 from .networks import *
 from .losses import *
@@ -20,7 +19,6 @@ class SynthMorph(pl.LightningModule):
         reg_weights=None
     ):
         super().__init__()
-        dim = len(vol_size)
         self.vol_size = vol_size
         self.num_labels = num_labels
         self.reg_model = VxmDense(
@@ -38,37 +36,26 @@ class SynthMorph(pl.LightningModule):
         self.l2_loss = Grad(penalty='l2', loss_mult=lmd)
         self.lmd = lmd
     
-    def training_step(self, batch, batch_idx):
+    def training_step(self, batch):
         fixed = batch['fixed']
         moving = batch['moving']
         fixed_map = batch['fixed_map']
         moving_map = batch['moving_map']
 
-        fixed = fixed.permute(0, 3, 1, 2)
-        moving = moving.permute(0, 3, 1, 2)
-
-        # preprocess label map
-        fixed_map = F.one_hot(fixed_map, num_classes=self.num_labels)
-        fixed_map = fixed_map.permute(0, 3, 1, 2)
-        fixed_map = fixed_map.contiguous().type(torch.float32)
-        
-        moving_map = F.one_hot(moving_map, num_classes=self.num_labels)
-        moving_map = moving_map.permute(0, 3, 1, 2)
-        moving_map = moving_map.contiguous().type(torch.float32)
-
         results = self.reg_model(moving, fixed, False)
 
-        y_source, y_target, flow = results['y_source'], results['y_target'], results['flow']
-        pred = layers.SpatialTransformer('linear', 'ij', fill_value=0)([moving_map, flow])
+        y_source, y_target, warp = results['y_source'], results['y_target'], results['flow']
+        pred = layers.SpatialTransformer(fill_value=0)([moving_map, warp])
+        pred = torch.where(pred == 0, torch.tensor(0), torch.tensor(1)).to(fixed_map.dtype)
         dice_loss = self.dice_loss.loss(fixed_map, pred) + 1.
-        grad_loss = self.l2_loss.loss(None, flow)
+        grad_loss = self.l2_loss.loss(None, warp)
         self.log_dict(
             dictionary={
                 'dice_loss': dice_loss, 
                 'grad_loss': grad_loss
             }, 
             on_epoch=True,
-            on_step=False, 
+            on_step=True, 
             prog_bar=True,
         )
 
@@ -76,8 +63,6 @@ class SynthMorph(pl.LightningModule):
     
     
     def predict_step(self, moving, fixed):
-        fixed = fixed.permute(0, 3, 1, 2)
-        moving = moving.permute(0, 3, 1, 2)
         results = self.reg_model(moving, fixed, True)
         flow = results["flow"]
         moved = results["y_source"]
