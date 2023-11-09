@@ -250,7 +250,7 @@ class VxmDense(nn.Module):
         # configure optional integration layer for diffeomorphic warp
         down_shape = [int(dim / int_downsize) for dim in inshape]
         # self.integrate = layers.VecInt(down_shape, int_steps) if int_steps > 0 else None
-        self.integrate = layers.VecInt()
+        self.integrate = layers.VecInt(int_steps=int_steps)
         
         # resize to full res
         if int_steps > 0 and int_downsize > 1:
