@@ -150,15 +150,20 @@ class SynthMorphDataset(Dataset):
     def __init__(
         self,
         size: int,
+        gen_arg: dict,
         input_size=(256,256),
         num_labels: int=26,
+        **kwargs
+
     ):
+        super().__init__(**kwargs)
         self.input_size = input_size
         self.num_labels = num_labels
         self.size = size
-        self.label_maps = [self.generate_label() for _ in tqdm(range(size))]
+        self.label_maps = [self._generate_label() for _ in tqdm(range(size))]
+        self.gen_arg = gen_arg
 
-    def generate_label(self):
+    def _generate_label(self):
         label_map = generate_map(
                 size=self.input_size,
                 nLabel=self.num_labels,
@@ -176,17 +181,16 @@ class SynthMorphDataset(Dataset):
  
         label = self.label_maps[index]      
 
-        fixed_map, fixed = map_to_image(label)
-        moving_map, moving = map_to_image(label)
-
-        fixed = fixed.astype(np.float32)
-        moving = moving.astype(np.float32)
+        fixed = labels_to_image(label, **self.gen_arg)
+        moving = labels_to_image(label, **self.gen_arg)
+        fixed_image, fixed_map = fixed['image'], fixed['label']
+        moving_image, moving_map = moving['image'], moving['label']
 
         results = {
-            "fixed": fixed,
-            "moving": moving,
-            "fixed_map": fixed_map.astype(np.int64),
-            "moving_map": moving_map.astype(np.int64)
+            "fixed": fixed_image.to(torch.float32),
+            "moving": moving_image.to(torch.float32),
+            "fixed_map": fixed_map.to(torch.int64),
+            "moving_map": moving_map.to(torch.int64)
         }
         
         return results
