@@ -71,12 +71,6 @@ def draw_perlin(out_shape,
     return out
 
 
-
-
-
-
-
-
 def generate_map(size: List[int] = [256, 256],
                  nLabel: int = 16,
                  random=np.random.RandomState(None),
@@ -98,8 +92,6 @@ def generate_map(size: List[int] = [256, 256],
 
     map = torch.argmax(deform, dim=-1)
     return map.to(torch.uint8)
-
-
 
 
 def minmax_norm(x, axis=None):
@@ -225,7 +217,7 @@ def labels_to_image(
     device=device
 ):
     """
-    Generative model for augmenting label maps and synthesizing images from them.
+    Augment label maps and synthesize images from them.
 
     Parameters:
         out_label_list (optional): List of labels in the output label maps. If
@@ -290,33 +282,28 @@ def labels_to_image(
     default_seed = lambda: np_rng.integers(np.iinfo(int).max).item()
     rng = lambda x : torch.Generator(device=device).manual_seed(x)
 
-
+    
+    num_dim = len(labels.shape)
     in_shape = labels.shape
     if out_shape is None:
         out_shape = in_shape
     in_shape, out_shape = map(np.asarray, (in_shape, out_shape))
-    num_dim = len(in_shape)
-
-    # Torch to TF tensor format
-    labels = labels.view(1, 1, *in_shape)
-    
-    # Inputs
-    is_not_integer = lambda x: torch.is_floating_point(x) or torch.is_complex(x)
-    if is_not_integer(labels):
-        labels = labels.to(torch.int32)
-    batch_size = labels.shape[0]
-    
-    # Transform labels into [0, 1, ..., N-1].
-    if labels.is_cuda:
-        in_label_list = labels.unique().detach().cpu().numpy()
+    batch_size = in_shape[0] if num_dim > 2 else 1
+    # Reshape
+    if num_dim > 2:
+        labels = labels.view(batch_size, num_chan, *in_shape[1:-1])
     else:
-        in_label_list = labels.unique().numpy()
+        labels = labels.view(batch_size, num_chan, *in_shape)
+
+    # Transform labels into [0, 1, ..., N-1].
+    labels = labels.to(dtype=torch.int32, device=device)
+    in_label_list = labels.unique()
     num_in_labels = len(in_label_list)
 
-    # in_lut = torch.zeros(torch.max(in_label_list) + 1, dtype=torch.float32)
-    # for i, lab in enumerate(in_label_list):
-    #     in_lut[lab] = i
-    # labels = in_lut[labels] # tf.gather(in_lut, indices=labels) 
+    in_lut = torch.zeros(size=(torch.max(in_label_list) + 1,), dtype=torch.int32, device=device)
+    for i, lab in enumerate(in_label_list):
+        in_lut[lab] = i
+    labels = in_lut[labels] # tf.gather(in_lut, indices=labels)
 
     if warp_std > 0:
         # Velocity field.
@@ -422,28 +409,30 @@ def labels_to_image(
     # as a dictionary, it can be used e.g. to convert labels to GM, WM, CSF.
     if out_label_list is None:
         out_label_list = in_label_list
-    if isinstance(out_label_list, (tuple, list, np.ndarray)):
-        out_label_list = {lab: lab for lab in out_label_list}
-    out_lut = np.zeros(num_in_labels, dtype='int32')
+    if isinstance(out_label_list, (tuple, list, torch.Tensor)):
+        out_label_list = {lab.item(): lab for lab in out_label_list}
+
+    out_lut = torch.zeros((num_in_labels,), dtype=torch.int32)
     for i, lab in enumerate(in_label_list):
-        if lab in out_label_list:
-            out_lut[i] = out_label_list[lab]
+        if lab.item() in out_label_list:
+            out_lut[i] = out_label_list[lab.item()]
 
     # For one-hot encoding, update the lookup table such that the M desired
     # output labels are rebased into the interval [0, M-1[. If the background
     # with value 0 is not part of the output labels, set it to -1 to remove it
     # from the one-hot maps.
     if one_hot:
-        hot_label_list = np.unique(list(out_label_list.values()))  # Sorted.
-        hot_lut = np.full(hot_label_list[-1] + 1, fill_value=-1, dtype='int32')
+        hot_label_list = torch.tensor(list(out_label_list.values())).unique() # Sorted.
+        hot_lut = torch.full((hot_label_list[-1] + 1,), fill_value=-1, dtype=torch.int32, device=device)
         for i, lab in enumerate(hot_label_list):
             hot_lut[lab] = i
-        out_lut = torch.tensor(hot_lut[out_lut], device=device)
+        out_lut = hot_lut[out_lut]
 
     # Convert indices to output labels only once.
     labels = out_lut[labels]
     if one_hot:
-        labels = nnf.one_hot(labels.to(torch.int64)[..., 0], num_classes=len(hot_label_list))
+        labels = nnf.one_hot(labels.to(torch.int64), num_classes=len(hot_label_list))
+        labels = labels.squeeze(1).permute(0, 3, 1, 2)
 
     outputs = {'image': image, 'label': labels}
     if return_vel:
