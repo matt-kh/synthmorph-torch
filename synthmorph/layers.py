@@ -346,7 +346,7 @@ class Resize(nn.Module):
         # map transform across batch
         out = torch.stack([self._single_resize(t) for t in vol])
         indices = list(range(len(out.shape)))
-        out = out = out.permute(0, -1, *indices[1:-1])
+        out = out.permute(0, -1, *indices[1:-1])
         return out
 
     def _single_resize(self, inputs):

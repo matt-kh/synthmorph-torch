@@ -127,7 +127,7 @@ def conform(x, in_shape, device):
     x = torch.from_numpy(x)
     x = minmax_norm(x)
     x = utils.resize(x, zoom_factor=[o / i for o, i in zip(in_shape, x.shape)])
-    x = x.view(1, *in_shape, 1)
+    x = x.view(1, 1, *x.shape)
     return x.to(device)
 
 
@@ -436,8 +436,8 @@ class SynthMorphDataset(Dataset):
         results = {
             "fixed": fixed_image.to(torch.float32),
             "moving": moving_image.to(torch.float32),
-            "fixed_map": fixed_map.to(torch.int64),
-            "moving_map": moving_map.to(torch.int64)
+            "fixed_map": fixed_map.to(torch.int32),
+            "moving_map": moving_map.to(torch.int32)
         }
         
         return results

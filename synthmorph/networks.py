@@ -265,7 +265,7 @@ class VxmDense(nn.Module):
         self.transformer = layers.SpatialTransformer('linear', 'ij')
 
         
-    def forward(self, source, target, registration=False):
+    def forward(self, source, target):
         '''
         Parameters:
             source: Source image tensor.
