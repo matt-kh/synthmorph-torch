@@ -163,7 +163,7 @@ def labels_to_image(
     seeds={},
     return_vel=False,
     return_def=False,
-    id=0,
+    batch_size=None,
     device=device
 ):
     """
@@ -225,20 +225,21 @@ def labels_to_image(
             to the model outputs. Defaults to False.
         return_def (bool, optional): Whether to append the combined displacement
             field to the model outputs. Defaults to False.
-        id (int, optional): Model identifier used to create unique layer names
-            for including this model multiple times. Defaults to 0.
     """
     np_rng = np.random.default_rng(None)
     default_seed = lambda: np_rng.integers(np.iinfo(int).max).item()
     rng = lambda x : torch.Generator(device=device).manual_seed(x)
-
+    batched = True
+    if batch_size is None:
+        batch_size = 1
+        batched = False
     
     num_dim = len(labels.shape)
     in_shape = labels.shape
     if out_shape is None:
         out_shape = in_shape
     in_shape, out_shape = map(np.asarray, (in_shape, out_shape))
-    batch_size = in_shape[0] if num_dim > 2 else 1
+
     # Reshape
     if num_dim > 2:
         labels = labels.view(batch_size, num_chan, *in_shape[1:-1])
@@ -384,6 +385,11 @@ def labels_to_image(
         labels = nnf.one_hot(labels.to(torch.int64), num_classes=len(hot_label_list))
         labels = labels.squeeze(1).permute(0, 3, 1, 2)
 
+    # Remove batch_size
+    all_outputs = [image, labels, vel_field, def_field]
+    if not batched:
+        image, labels, vel_field, def_field = [i.squeeze(0) for i in all_outputs]
+    
     outputs = {'image': image, 'label': labels}
     if return_vel:
         outputs['vel'] = vel_field
@@ -400,6 +406,7 @@ class SynthMorphDataset(Dataset):
         gen_arg: dict,
         input_size=(256,256),
         num_labels: int=26,
+        augment=True,
         **kwargs
 
     ):
@@ -408,7 +415,9 @@ class SynthMorphDataset(Dataset):
         self.num_labels = num_labels
         self.size = size
         self.label_maps = [self._generate_label() for _ in tqdm(range(size))]
+        self.num_dim = len(input_size)
         self.gen_arg = gen_arg
+        self.augment = augment
 
     def _generate_label(self):
         label_map = generate_map(
@@ -432,6 +441,11 @@ class SynthMorphDataset(Dataset):
         moving = labels_to_image(label, **self.gen_arg)
         fixed_image, fixed_map = fixed['image'], fixed['label']
         moving_image, moving_map = moving['image'], moving['label']
+
+        if self.augment:
+            rng = np.random.default_rng()
+            axes = rng.choice(self.num_dim, size=rng.integers(self.num_dim + 1), replace=False, shuffle=False)
+            fixed_image, moving_image = [torch.flip(im, dims=tuple(axes)) for im in [fixed_image, moving_image]]
 
         results = {
             "fixed": fixed_image.to(torch.float32),
