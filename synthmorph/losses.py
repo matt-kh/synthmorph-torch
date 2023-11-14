@@ -54,7 +54,7 @@ class Dice:
 
     def loss(self, y_true, y_pred):
         ndims = len(list(y_pred.shape)) - 2
-        vol_axes = list(range(2, ndims + 2))
+        vol_axes = list(range(-ndims, 0))
         top = 2 * (y_true * y_pred).sum(dim=vol_axes)
         bottom = (y_true + y_pred).sum(dim=vol_axes)
         dice = divide_no_nan(top, bottom)
