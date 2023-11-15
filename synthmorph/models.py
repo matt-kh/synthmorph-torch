@@ -71,6 +71,5 @@ class SynthMorph(pl.LightningModule):
 
     
     def configure_optimizers(self, lr=1e-4):
-        optimizer = torch.optim.Adam(self.reg_model.parameters(), lr=lr)
-
+        optimizer = torch.optim.Adam(self.parameters(), lr=lr)
         return optimizer
