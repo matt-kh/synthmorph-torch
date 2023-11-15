@@ -84,7 +84,7 @@ def interpn(vol, loc, interp_method='linear', fill_value=None, device=device):
         roundloc = [roundloc[..., d].clamp(0, max_loc[d]) for d in range(nb_dims)]
 
         idx = sub2ind2d(vol_shape[:-1], roundloc)
-        interp_vol = vol.view(-1, vol_shape[-1])[idx]
+        interp_vol = vol.reshape(-1, vol_shape[-1])[idx]
 
     if fill_value is not None:
         out_type = interp_vol.dtype
@@ -213,14 +213,14 @@ def affine_to_dense_shift(matrix, shape,
         mesh = [(f - (shape[i] - 1) / 2) for i, f in enumerate(mesh)]
 
     # add an all-ones entry and transform into a large matrix
-    flat_mesh = [f.view(-1) for f in mesh]
+    flat_mesh = [f.reshape(-1) for f in mesh]
     flat_mesh.append(torch.ones_like(flat_mesh[0], dtype=matrix.dtype))
     mesh_matrix = torch.stack(flat_mesh, dim=1).transpose(0, 1)  # 4 x nb_voxels
 
     # compute locations
     loc_matrix = torch.matmul(matrix, mesh_matrix)  # N+1 x nb_voxels
     loc_matrix = loc_matrix[:ndims, :].transpose(0, 1)  # nb_voxels x N
-    loc = loc_matrix.view(shape + [ndims])  # *shape x N
+    loc = loc_matrix.reshape(shape + [ndims])  # *shape x N
 
     # get shifts and return
     return loc - torch.stack(mesh, dim=ndims)

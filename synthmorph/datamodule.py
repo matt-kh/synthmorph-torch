@@ -127,11 +127,11 @@ def conform(x, in_shape, device):
     x = torch.from_numpy(x)
     x = minmax_norm(x)
     x = utils.resize(x, zoom_factor=[o / i for o, i in zip(in_shape, x.shape)])
-    x = x.view(1, 1, *x.shape)
+    x = x.unsqueeze(0).unsqueeze(1)
     return x.to(device)
 
 
-def post_predict(x):
+def torch2numpy(x):
     x = torch.squeeze(x)
     x = x.cpu()
     x = x.detach().numpy()
@@ -228,7 +228,7 @@ def labels_to_image(
     """
     np_rng = np.random.default_rng(None)
     default_seed = lambda: np_rng.integers(np.iinfo(int).max).item()
-    rng = lambda x : torch.Generator(device=device).manual_seed(x)
+    rng = lambda x: torch.Generator(device=device).manual_seed(x)
     batched = True
     if batch_size is None:
         batch_size = 1
@@ -240,11 +240,9 @@ def labels_to_image(
         out_shape = in_shape
     in_shape, out_shape = map(np.asarray, (in_shape, out_shape))
 
-    # Reshape
-    if num_dim > 2:
-        labels = labels.view(batch_size, num_chan, *in_shape[1:-1])
-    else:
-        labels = labels.view(batch_size, num_chan, *in_shape)
+    # Add new axes
+    labels = labels.unsqueeze(0).unsqueeze(1)
+    labels = labels.expand(batch_size, num_chan, *in_shape)
 
     # Transform labels into [0, 1, ..., N-1].
     labels = labels.to(dtype=torch.int32, device=device)
