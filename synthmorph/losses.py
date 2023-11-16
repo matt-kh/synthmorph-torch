@@ -10,9 +10,7 @@ class Grad:
         self.loss_mult = loss_mult
 
     def _diffs(self, y):
-        y_indices = list(range(len(y.shape)))
-        y = y.permute(0, *y_indices[2:], 1) # to TF format
-        vol_shape = list(y.shape)[1:-1]
+        vol_shape = list(y.shape)[2:]
         ndims = len(vol_shape)
 
         df = [None] * ndims
