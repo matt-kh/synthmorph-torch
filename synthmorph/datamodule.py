@@ -1,11 +1,14 @@
 from typing import List
 import torch
+import torch.nn.functional as nnf
 import cv2
 import numpy as np
 from scipy.interpolate import interpn
 from scipy.ndimage.filters import gaussian_filter
 from torch.utils.data import Dataset
 from tqdm import tqdm
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # local code
 from .utils import resize
@@ -267,16 +270,28 @@ class SynthMorphDataset(Dataset):
         label = self.label_maps[index]      
 
         fixed_map, fixed = map_to_image(label)
-        moving_map, moving = map_to_image(label)
+        moving_map, moving =  map_to_image(label)
+        
 
-        fixed = fixed.astype(np.float32)
-        moving = moving.astype(np.float32)
+        fixed = torch.tensor(fixed).permute(2, 0, 1)
+        moving = torch.tensor(moving).permute(2, 0, 1)
+        fixed_map = torch.tensor(fixed_map, dtype=torch.int64),
+        moving_map = torch.tensor(moving_map, dtype=torch.int64)
+    
+        # preprocess label map
+        fixed_map = nnf.one_hot(fixed_map[0], num_classes=self.num_labels)
+        fixed_map = fixed_map.permute(2, 0, 1)
+        fixed_map = fixed_map.contiguous()
+        
+        moving_map = nnf.one_hot(moving_map, num_classes=self.num_labels)
+        moving_map = moving_map.permute(2, 0, 1)
+        moving_map = moving_map.contiguous()
 
         results = {
-            "fixed": fixed,
-            "moving": moving,
-            "fixed_map": fixed_map.astype(np.int64),
-            "moving_map": moving_map.astype(np.int64)
+            "fixed": fixed.to(torch.float32),
+            "moving": moving.to(torch.float32),
+            "fixed_map": fixed_map,
+            "moving_map": moving_map
         }
         
         return results

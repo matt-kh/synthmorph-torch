@@ -44,18 +44,6 @@ class SynthMorph(pl.LightningModule):
         fixed_map = batch['fixed_map']
         moving_map = batch['moving_map']
 
-        fixed = fixed.permute(0, 3, 1, 2)
-        moving = moving.permute(0, 3, 1, 2)
-
-        # preprocess label map
-        fixed_map = F.one_hot(fixed_map, num_classes=self.num_labels)
-        fixed_map = fixed_map.permute(0, 3, 1, 2)
-        fixed_map = fixed_map.contiguous().type(torch.float32)
-        
-        moving_map = F.one_hot(moving_map, num_classes=self.num_labels)
-        moving_map = moving_map.permute(0, 3, 1, 2)
-        moving_map = moving_map.contiguous().type(torch.float32)
-
         results = self.reg_model(moving, fixed, False)
 
         y_source, y_target, flow = results['y_source'], results['y_target'], results['flow']
