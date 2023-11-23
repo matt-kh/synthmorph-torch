@@ -51,12 +51,11 @@ class Dice:
     """
 
     def loss(self, y_true, y_pred):
-        ndims = len(list(y_pred.shape)) - 2
-        vol_axes = list(range(-ndims, 0))
+        ndims = len(list(y_pred.size())) - 2
+        vol_axes = list(range(2, ndims + 2))
         top = 2 * (y_true * y_pred).sum(dim=vol_axes)
-        bottom = (y_true + y_pred).sum(dim=vol_axes)
-        dice = divide_no_nan(top, bottom)
-        dice = torch.mean(dice)
+        bottom = torch.clamp((y_true + y_pred).sum(dim=vol_axes), min=1e-5)
+        dice = torch.mean(top / bottom)
         return -dice
 
 
