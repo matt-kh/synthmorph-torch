@@ -539,6 +539,7 @@ def separable_conv(x,
         x = torch.unsqueeze(x, dim=0)
     shape_space = x.shape[1:-1]
     num_dim = len(shape_space)
+    x_shape_indices = np.arange(len(x.shape))
 
     # Axes.
     if np.isscalar(axis):
@@ -582,11 +583,13 @@ def separable_conv(x,
     )
     x = torch.reshape(x, shape=tuple(merge_shape))
 
+    x = x.permute(0, -1, *x_shape_indices[1:-1])    # Torch format
     # Convolve.
     for ax, k, s, d in zip(axis, kernels, strides, dilations):
         width = np.prod(k.shape)
         k = torch.reshape(k, shape=(*ones[:ax], width, *ones[ax + 1:], 1, 1))
-        x = nnf.conv2d(x, k, padding=padding, stride=s, dilation=d)     # tf.nn.convolution
+        x = nnf.conv2d(x, k, padding=padding, stride=s, dilation=d)     # tf.nn.convolution    
+    x = x.permute(0, *x_shape_indices[2:], 1)    # TF format
 
     # Restore dimensions.
     restore_shape = np.concatenate((shape_bc, tuple(x.shape)[1:-1]), axis=0)

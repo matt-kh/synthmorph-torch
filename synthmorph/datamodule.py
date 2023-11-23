@@ -57,8 +57,7 @@ def draw_perlin(out_shape,
         sample_shape = np.ceil(out_shape_np[:-1] / scale)
         sample_shape = np.int32((*sample_shape, out_shape_np[-1]))
 
-        std = torch.rand(size=(), dtype=dtype, generator=rng, device=device)
-        std = min_std + (max_std - min_std) * std
+        std = torch.empty(size=(), dtype=dtype, device=device).uniform_(min_std, max_std, generator=rng)
         gauss = torch.empty(size=tuple(sample_shape), dtype=dtype, device=device).normal_(std=std, generator=rng)
 
         zoom = [o / s for o, s in zip(out_shape, sample_shape)]
@@ -71,27 +70,38 @@ def draw_perlin(out_shape,
     return out
 
 
-def generate_map(size: List[int] = [256, 256],
-                 nLabel: int = 16,
-                 random=np.random.RandomState(None),
-                 device=device
+def generate_map(
+    size: List[int] = [256, 256],
+    nLabel: int = 16,
+    device=device
 ):
 
-    seed1 = random.randint(0, 2**31 - 1)
-    seed2 = random.randint(0, 2**31 - 1)
-
     num_dim = len(size)
-    out = draw_perlin([*size, nLabel], [32, 64], max_std=1, seed=seed1, device=device)
-    warp = draw_perlin([*size, nLabel, num_dim], [16, 32, 64], max_std=16, seed=seed2, device=device)
+    out = draw_perlin(
+        out_shape=[*size, nLabel], 
+        scales=[32, 64], 
+        max_std=1, 
+        device=device
+    )
+    warp = draw_perlin(
+        out_shape=[*size, nLabel, num_dim], 
+        scales=[16, 32, 64], 
+        max_std=16, 
+        device=device
+    )
     
+    # Spatial transform
     out_indices = np.arange(len(out.shape))
     warp_indices = np.arange(len(warp.shape))
+    # Convert to TF format
     out = out.permute(*out_indices[1:], 0)
     warp = warp.permute(*warp_indices[1: -1], -1, 0)
     deform = utils.transform(out, warp)
+    deform_indices = np.arange(len(deform.shape))
+    deform = deform.permute(-1, *deform_indices[:-1]) # back to torch
 
-    map = torch.argmax(deform, dim=-1)
-    return map.to(torch.uint8)
+    map = torch.argmax(deform, dim=0).to(torch.uint8)
+    return map
 
 
 def minmax_norm(x, axis=None):
@@ -131,13 +141,14 @@ def conform(x, in_shape, device):
     return x.to(device)
 
 
-def torch2numpy(x):
+def torch2numpy(x, device=device):
     x = torch.squeeze(x)
-    x = x.cpu()
+    if device == 'cuda':
+        x = x.cpu()
     x = x.detach().numpy()
     return x
 
-    
+@torch.no_grad()
 def labels_to_image(
     labels,
     out_label_list=None,
@@ -233,16 +244,17 @@ def labels_to_image(
     if batch_size is None:
         batch_size = 1
         batched = False
-    
+
     num_dim = len(labels.shape)
     in_shape = labels.shape
     if out_shape is None:
         out_shape = in_shape
     in_shape, out_shape = map(np.asarray, (in_shape, out_shape))
 
-    # Add new axes
+    # Add new axes, Torch format
     labels = labels.unsqueeze(0).unsqueeze(1)
-    labels = labels.expand(batch_size, num_chan, *in_shape)
+    labels = labels.expand(batch_size, -1, *[-1] * num_dim)
+    labels_shape_indices = np.arange(len(labels.shape))
 
     # Transform labels into [0, 1, ..., N-1].
     labels = labels.to(dtype=torch.int32, device=device)
@@ -258,13 +270,13 @@ def labels_to_image(
         # Velocity field.
         vel_shape = (*out_shape // 2, num_dim)
         vel_scale = np.asarray(warp_res) / 2
-        vel_draw = lambda x: draw_perlin(
+        vel_draw = lambda: draw_perlin(
             vel_shape, scales=vel_scale,
             min_std=0 if warp_modulate else warp_std, max_std=warp_std,
             seed=seeds.get('warp')
         )
         # One per batch.
-        vel_field = torch.stack([vel_draw(l) for l in labels])
+        vel_field = torch.stack([vel_draw() for _ in labels])
         # Deformation field.
         def_field = layers.VecInt(int_steps=5)(vel_field)
         def_field = layers.RescaleValues(2)(def_field)
@@ -273,7 +285,9 @@ def labels_to_image(
         labels = layers.SpatialTransformer(interp_method='nearest', fill_value=0)([labels, def_field])
 
     labels = labels.to(torch.int32)
-    # Intensity means and standard deviations.
+    labels = labels.permute(0, *labels_shape_indices[2:], 1)    # TF format
+
+    # Intensity means and standard deviations for synthetic image
     if mean_min is None:
         mean_min = [0] + [25] * (num_in_labels - 1)
     if mean_max is None:
@@ -328,12 +342,13 @@ def labels_to_image(
     # Bias field.
     if bias_std > 0:
         bias_shape = (*out_shape, 1)
-        bias_draw = lambda x: draw_perlin(
+        bias_draw = lambda: draw_perlin(
             bias_shape, scales=bias_res, seed=seeds.get('bias'),
             min_std=0 if bias_modulate else bias_std, 
             max_std=bias_std, device=device
         )
-        bias_field = torch.stack([bias_draw(l) for l in labels])
+        bias_field = torch.stack([bias_draw() for _ in labels])
+        bias_field = bias_field.permute(0, *labels_shape_indices[2:], 1)   # TF format
         image *= torch.exp(bias_field)
 
     # Intensity manipulations.
@@ -345,14 +360,12 @@ def labels_to_image(
         gamma = gamma.normal_(std=gamma_std, generator=rng(seeds.get('gamma', default_seed())))
         image = torch.pow(image, torch.exp(gamma))
     if dc_offset > 0:
-        offset = torch.rand(
-            size=(batch_size, *[1] * num_dim, num_chan),
-            generator=(rng(seeds.get('dc_offset'), default_seed())),
-            device=device
-        )
-        offset *= dc_offset
+        offset = torch.empty(size=(batch_size, *[1] * num_dim, num_chan), device=device)
+        offset = offset.uniform_(0, dc_offset, generator=rng(seeds.get('dc_offset', default_seed())))
         image += offset
 
+    image = image.permute(0, -1, *labels_shape_indices[1:-1])
+    
     # Lookup table for converting the index labels back to the original values,
     # setting unwanted labels to background. If the output labels are provided
     # as a dictionary, it can be used e.g. to convert labels to GM, WM, CSF.
@@ -381,7 +394,7 @@ def labels_to_image(
     labels = out_lut[labels]
     if one_hot:
         labels = nnf.one_hot(labels.to(torch.int64), num_classes=len(hot_label_list))
-        labels = labels.squeeze(1).permute(0, 3, 1, 2)
+        labels = labels.squeeze(-2).permute(0, -1, *labels_shape_indices[1:-1])
 
     # Remove batch_size
     all_outputs = [image, labels, vel_field, def_field]
@@ -418,12 +431,16 @@ class SynthMorphDataset(Dataset):
         self.augment = augment
 
     def _generate_label(self):
-        label_map = generate_map(
+        # Fix for number of unique values from generate_map not matcing num_labels
+        label_unique = 0
+        while label_unique != self.num_labels:
+            label_map = generate_map(
                 size=self.input_size,
                 nLabel=self.num_labels,
             )
-
-        return label_map
+            label_unique = len(label_map.unique())
+            
+            return label_map
     
     def prepare_data(self):
         pass
@@ -433,23 +450,22 @@ class SynthMorphDataset(Dataset):
 
     def __getitem__(self, index: int):
  
-        label = self.label_maps[index]      
+        label = self.label_maps[index]
+        if self.augment:
+            rng = np.random.default_rng()
+            axes = rng.choice(self.num_dim, size=rng.integers(self.num_dim + 1), replace=False, shuffle=False)
+            label = torch.flip(label, dims=tuple(axes))
 
         fixed = labels_to_image(label, **self.gen_arg)
         moving = labels_to_image(label, **self.gen_arg)
         fixed_image, fixed_map = fixed['image'], fixed['label']
         moving_image, moving_map = moving['image'], moving['label']
 
-        if self.augment:
-            rng = np.random.default_rng()
-            axes = rng.choice(self.num_dim, size=rng.integers(self.num_dim + 1), replace=False, shuffle=False)
-            fixed_image, moving_image = [torch.flip(im, dims=tuple(axes)) for im in [fixed_image, moving_image]]
-
         results = {
             "fixed": fixed_image.to(torch.float32),
             "moving": moving_image.to(torch.float32),
-            "fixed_map": fixed_map.to(torch.int32),
-            "moving_map": moving_map.to(torch.int32)
+            "fixed_map": fixed_map.to(torch.int64),
+            "moving_map": moving_map.to(torch.int64)
         }
         
         return results
