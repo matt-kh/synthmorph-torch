@@ -46,17 +46,16 @@ class SynthMorph(pl.LightningModule):
 
         y_source, y_target, warp = results['y_source'], results['y_target'], results['flow']
         pred = layers.SpatialTransformer(fill_value=0)([moving_map, warp])
-        # pred = torch.where(pred == 0, torch.tensor(0), torch.tensor(1)).to(fixed_map.dtype)
-        pred = pred.round().clip(0, 1).to(fixed_map.dtype)
         dice_loss = self.dice_loss.loss(fixed_map, pred) + 1.
         grad_loss = self.l2_loss.loss(None, warp)
         self.log_dict(
             dictionary={
                 'dice_loss': dice_loss, 
-                'grad_loss': grad_loss
+                'grad_loss': grad_loss,
+                'total_loss': dice_loss + grad_loss
             }, 
             on_epoch=True,
-            on_step=True, 
+            on_step=False, 
             prog_bar=True,
         )
 
@@ -71,5 +70,5 @@ class SynthMorph(pl.LightningModule):
 
     
     def configure_optimizers(self, lr=1e-4):
-        optimizer = torch.optim.Adam(self.parameters(), lr=lr)
+        optimizer = torch.optim.AdamW(self.parameters(), lr=lr)
         return optimizer
