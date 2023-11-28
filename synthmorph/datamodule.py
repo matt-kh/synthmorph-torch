@@ -174,7 +174,6 @@ def labels_to_image(
     seeds={},
     return_vel=False,
     return_def=False,
-    batch_size=None,
     device=device
 ):
     """
@@ -240,11 +239,8 @@ def labels_to_image(
     np_rng = np.random.default_rng(None)
     default_seed = lambda: np_rng.integers(np.iinfo(int).max).item()
     rng = lambda x: torch.Generator(device=device).manual_seed(x)
-    batched = True
-    if batch_size is None:
-        batch_size = 1
-        batched = False
-
+    
+    batch_size = 1
     num_dim = len(labels.shape)
     in_shape = labels.shape
     if out_shape is None:
@@ -398,8 +394,7 @@ def labels_to_image(
 
     # Remove batch_size
     all_outputs = [image, labels, vel_field, def_field]
-    if not batched:
-        image, labels, vel_field, def_field = [i.squeeze(0) for i in all_outputs]
+    image, labels, vel_field, def_field = [i.squeeze(0) for i in all_outputs]
     
     outputs = {'image': image, 'label': labels}
     if return_vel:
@@ -429,6 +424,7 @@ class SynthMorphDataset(Dataset):
         self.num_dim = len(input_size)
         self.gen_arg = gen_arg
         self.augment = augment
+        self.rng = np.random.default_rng()
 
     def _generate_label(self):
         # Fix for number of unique values from generate_map not matcing num_labels
@@ -452,8 +448,7 @@ class SynthMorphDataset(Dataset):
  
         label = self.label_maps[index]
         if self.augment:
-            rng = np.random.default_rng()
-            axes = rng.choice(self.num_dim, size=rng.integers(self.num_dim + 1), replace=False, shuffle=False)
+            axes = self.rng.choice(self.num_dim, size=self.rng.integers(self.num_dim + 1), replace=False, shuffle=False)
             label = torch.flip(label, dims=tuple(axes))
 
         fixed = labels_to_image(label, **self.gen_arg)
