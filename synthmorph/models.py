@@ -19,6 +19,7 @@ class SynthMorph(pl.LightningModule):
         reg_weights=None
     ):
         super().__init__()
+        self.save_hyperparameters()
         self.vol_size = vol_size
         self.num_labels = num_labels
         self.reg_model = VxmDense(
@@ -69,6 +70,6 @@ class SynthMorph(pl.LightningModule):
         return moved, flow
 
     
-    def configure_optimizers(self, lr=1e-4):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=lr)
+    def configure_optimizers(self, lr=1e-5):
+        optimizer = torch.optim.Adam(self.parameters(), lr=lr)
         return optimizer
