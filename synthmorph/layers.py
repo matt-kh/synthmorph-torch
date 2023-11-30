@@ -6,7 +6,7 @@ import torch.nn as nn
 from . import utils
 
 
-class SpatialTransFormer(nn.Module):
+class SpatialTransformer(nn.Module):
     """
     ND spatial transformer layer
 

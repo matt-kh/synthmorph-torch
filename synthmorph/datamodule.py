@@ -257,13 +257,13 @@ def map_to_image(label_map: np.ndarray):
     rand_flip = rand_flip < 0.2 ** 16
     out *= 1 - rand_flip
     
-    # out = gaussian_filter(out, 1)   # gaussian blur
+    out = gaussian_filter(out, 1)   # gaussian blur
 
-    # bias_field = draw_perlin([*shape, 1],
-    #                          scales=[40],
-    #                          min_std=0.3, max_std=0.3)
-    # bias_field = np.squeeze(bias_field, -1)
-    # out *= np.exp(bias_field)
+    bias_field = draw_perlin([*shape, 1],
+                             scales=[40],
+                             min_std=0.3, max_std=0.3)
+    bias_field = np.squeeze(bias_field, -1)
+    out *= np.exp(bias_field)
 
     # Intensity manipulation
     out = np.clip(out, 0, 255)
@@ -356,10 +356,10 @@ class SynthMorphDataset(Dataset):
         moving_map, moving =  map_to_image(label)
         
 
-        fixed = torch.tensor(fixed).permute(2, 0, 1)
-        moving = torch.tensor(moving).permute(2, 0, 1)
-        fixed_map = torch.tensor(fixed_map, dtype=torch.int64),
-        moving_map = torch.tensor(moving_map, dtype=torch.int64)
+        fixed = torch.tensor(fixed, device=device).permute(2, 0, 1)
+        moving = torch.tensor(moving, device=device).permute(2, 0, 1)
+        fixed_map = torch.tensor(fixed_map, dtype=torch.int64, device=device),
+        moving_map = torch.tensor(moving_map, dtype=torch.int64, device=device)
     
         # preprocess label map
         fixed_map = nnf.one_hot(fixed_map[0], num_classes=self.num_labels)

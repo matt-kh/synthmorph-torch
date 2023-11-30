@@ -38,16 +38,16 @@ class SynthMorph(pl.LightningModule):
         self.l2_loss = Grad(penalty='l2', loss_mult=lmd)
         self.lmd = lmd
     
-    def training_step(self, batch, batch_idx):
+    def training_step(self, batch):
         fixed = batch['fixed']
         moving = batch['moving']
         fixed_map = batch['fixed_map']
         moving_map = batch['moving_map']
 
-        results = self.reg_model(moving, fixed, False)
+        results = self.reg_model(moving, fixed)
 
         y_source, y_target, flow = results['y_source'], results['y_target'], results['flow']
-        pred = layers.SpatialTransFormer('linear', 'ij', fill_value=0)([moving_map, flow])
+        pred = layers.SpatialTransformer('linear', 'ij', fill_value=0)([moving_map, flow])
         dice_loss = self.dice_loss.loss(fixed_map, pred) + 1.
         grad_loss = self.l2_loss.loss(None, flow)
         self.log_dict(
@@ -64,9 +64,7 @@ class SynthMorph(pl.LightningModule):
     
     
     def predict_step(self, moving, fixed):
-        fixed = fixed.permute(0, 3, 1, 2)
-        moving = moving.permute(0, 3, 1, 2)
-        results = self.reg_model(moving, fixed, True)
+        results = self.reg_model(moving, fixed)
         flow = results["flow"]
         moved = results["y_source"]
         return moved, flow
