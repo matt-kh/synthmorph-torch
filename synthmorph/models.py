@@ -14,9 +14,11 @@ class SynthMorph(pl.LightningModule):
         dec_nf,
         int_steps=7,
         int_downsize=2,
-        lmd=1,
         bidir=False,
-        reg_weights=None
+        lmd=1,
+        lr=1e-4,
+        reg_weights=None,
+       
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -36,6 +38,8 @@ class SynthMorph(pl.LightningModule):
         self.dice_loss = Dice()
         self.l2_loss = Grad(penalty='l2', loss_mult=lmd)
         self.lmd = lmd
+        
+        self.lr = lr
     
     def training_step(self, batch):
         fixed = batch['fixed']
@@ -70,6 +74,6 @@ class SynthMorph(pl.LightningModule):
         return moved, flow
 
     
-    def configure_optimizers(self, lr=1e-5):
-        optimizer = torch.optim.Adam(self.parameters(), lr=lr)
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
         return optimizer
