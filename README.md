@@ -2,7 +2,7 @@
 
 Implementation of [SynthMorph](https://martinos.org/malte/synthmorph/) in PyTorch.
 
-This project mainly adapts the source code from [VoxelMorph](https://github.com/voxelmorph/voxelmorph) and its supporting library, [Neurite](https://github.com/adalca/neurite).
+This project mainly adapts the source code from libraries [VoxelMorph](https://github.com/voxelmorph/voxelmorph) and [Neurite](https://github.com/adalca/neurite).
 
 ## Purpose
 
@@ -20,6 +20,6 @@ In your Python environment:
 pip install -r requirements.txt
 ```
 
-## Updates
+## Updates (1 Dec, 2023)
 
-- Currently, data generation implementation in Torch is under development in the `datagen` branch. This will eventually replace all the NumPy functions for data generation, which is noticeably slow.
+- Data generation (both label map and image) uses  faithful Torch implementation instead of NumPy. It is also much faster now, especially with GPU.
