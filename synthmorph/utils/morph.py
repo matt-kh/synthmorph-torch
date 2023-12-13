@@ -599,6 +599,76 @@ def separable_conv(x,
     return x if batched else x[0, ...]
 
 
+def barycenter(x, axes=None, normalize=False, shift_center=False, dtype=torch.float32):
+    """
+    Compute barycenter along specified axes.
+
+    Arguments:
+        x:
+            Input tensor of any type. Will be cast to FP32 if needed.
+        axes:
+            Axes along which to compute the barycenter. None means all axes.
+        normalize:
+            Normalize grid dimensions to unit length.
+        shift_center:
+            Shift grid to image center.
+        dtype:
+            Output data type. The computation always uses single precision.
+
+    Returns:
+        Center of mass of the specified data type.
+
+    If you find this function useful, please consider citing:
+        M Hoffmann, B Billot, DN Greve, JE Iglesias, B Fischl, AV Dalca
+        SynthMorph: learning contrast-invariant registration without acquired images
+        IEEE Transactions on Medical Imaging (TMI), 41 (3), 543-558, 2022
+        https://doi.org/10.1109/TMI.2021.3116879
+    """
+    compute_dtype = torch.float32
+    if x.dtype != compute_dtype:
+        x = x.to(compute_dtype)
+    
+    # Move reduction axes to end
+    axes_all = range(len(x.shape))
+    if axes is None:
+        axes = axes_all
+    axes_sub = tuple(ax for ax in axes_all if ax not in axes)
+    if axes_sub:
+        x = x.permute(*axes_sub, *axes)
+
+    num_dim = len(axes)
+    vol_shape = x.shape[-num_dim:]
+
+    # Coordinate grid
+    grid = (torch.arange(f, dtype=x.dtype) for f in vol_shape)
+    if shift_center:
+        grid = (g - (v - 1) / 2 for g, v in zip(grid, vol_shape))
+    if normalize:
+        grid = (g / v for g, v in zip(grid, vol_shape))
+    grid = torch.meshgrid(*grid, indexing='ij')
+    grid = torch.stack(grid, axis=-1)
+
+    # Reduction
+    axes_red = axes_all[-num_dim:]
+    x = x.expand(axis=-1)
+    x = divide_no_nan(
+        torch.sum(grid * x, dim=axes_red),
+        torch.mean(x, dim=axes_red)
+    )
+
+    return x.to(dtype=dtype) if dtype != compute_dtype else x
+
+
+def divide_no_nan(x, y):
+    # Create a mask to handle division by zero or NaN in y
+    mask = (y != 0) & ~torch.isnan(y)
+    
+    # Perform the division only where the mask is True
+    result = torch.where(mask, x / y, torch.zeros_like(x))
+    
+    return result
+
+
 def numpy_torch_dtype(dtype):
     """
     Source:
