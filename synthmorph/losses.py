@@ -58,12 +58,3 @@ class Dice:
         dice = torch.mean(top / bottom)
         return -dice
 
-
-def divide_no_nan(x, y):
-    # Create a mask to handle division by zero or NaN in y
-    mask = (y != 0) & ~torch.isnan(y)
-    
-    # Perform the division only where the mask is True
-    result = torch.where(mask, x / y, torch.zeros_like(x))
-    
-    return result
