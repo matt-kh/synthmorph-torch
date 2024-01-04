@@ -13,7 +13,7 @@ class SynthMorph(pl.LightningModule):
         enc_nf,
         dec_nf,
         int_steps=7,
-        int_downsize=2,
+        int_resolution=2,
         bidir=False,
         lmd=1,
         lr=1e-4,
@@ -28,9 +28,8 @@ class SynthMorph(pl.LightningModule):
             inshape=vol_size,
             nb_unet_features=[enc_nf, dec_nf],
             int_steps=int_steps,
-            int_downsize=int_downsize,
+            int_resolution=int_resolution,
             bidir=bidir,
-            unet_half_res=True,
         )
         if reg_weights is not None:
             self.reg_model.load_state_dict(torch.load(reg_weights))   # .pth file
@@ -77,3 +76,6 @@ class SynthMorph(pl.LightningModule):
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
         return optimizer
+    
+    def save_weigths(self, pth):
+        torch.save(self.reg_model.state_dict(), pth)
