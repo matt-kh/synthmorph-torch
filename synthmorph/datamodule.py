@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as nnf
 import numpy as np
 from torch.utils.data import Dataset
-from torchvision.transforms import GaussianBlur
+from torchvision.transforms import GaussianBlur, RandomAffine
 from tqdm import tqdm
 
 # local code
@@ -159,6 +159,7 @@ def labels_to_image(
     std_min=None,
     std_max=None,
     zero_background=0.2,
+    affine=False,
     warp_res=[16],
     warp_std=0.5,
     warp_modulate=True,
@@ -262,6 +263,8 @@ def labels_to_image(
         in_lut[lab] = i
     labels = in_lut[labels] # tf.gather(in_lut, indices=labels)
 
+    def_field = None
+    vel_field = None
     if warp_std > 0:
         # Velocity field.
         vel_shape = (*out_shape // 2, num_dim)
@@ -279,6 +282,10 @@ def labels_to_image(
         def_field = layers.Resize(2, interp_method='linear')(def_field)
         # Resampling.
         labels = layers.SpatialTransformer(interp_method='nearest', fill_value=0)([labels, def_field])
+    
+    if affine:
+        aff_transformer = RandomAffine(degrees=0, translate=(0, 0.05), scale=(0.80, 0.90))
+        labels = aff_transformer(labels)
 
     labels = labels.to(torch.int32)
     labels = labels.permute(0, *labels_shape_indices[2:], 1)    # TF format
@@ -393,9 +400,197 @@ def labels_to_image(
         labels = labels.squeeze(-2).permute(0, -1, *labels_shape_indices[1:-1])
 
     # Remove batch_size
-    all_outputs = [image, labels, vel_field, def_field]
-    image, labels, vel_field, def_field = [i.squeeze(0) for i in all_outputs]
+    if vel_field is not None:
+        all_outputs = [image, labels, vel_field, def_field]
+        image, labels, vel_field, def_field = [i.squeeze(0) for i in all_outputs]
+    else:
+        all_outputs = [image, labels]
+        image, labels = [i.squeeze(0) for i in all_outputs]
     
+    
+    outputs = {'image': image, 'label': labels}
+    if return_vel:
+        outputs['vel'] = vel_field
+    if return_def:
+        outputs['def'] =  def_field
+
+    return outputs
+
+
+def labels_to_image_new(
+    labels,
+    labels_out=None,
+    in_shape=None,
+    out_shape=None,
+    input_model=None,
+    num_chan=1,
+    aff_shift=0,
+    aff_rotate=0,
+    aff_scale=0,
+    aff_shear=0,
+    aff_normal_shift=False,
+    aff_normal_rotate=False,
+    aff_normal_scale=False,
+    aff_normal_shear=False,
+    axes_flip=False,
+    axes_swap=False,
+    warp_min=0.01,
+    warp_max=2,
+    warp_blur_min=(8, 8),
+    warp_blur_max=(32, 32),
+    warp_zero_mean=False,
+    crop_min=0,
+    crop_max=0.2,
+    crop_prob=0,
+    crop_axes=None,
+    mean_min=None,
+    mean_max=None,
+    noise_min=0.1,
+    noise_max=0.2,
+    zero_background=0,
+    blur_min=0,
+    blur_max=1,
+    bias_min=0.01,
+    bias_max=0.1,
+    bias_blur_min=32,
+    bias_blur_max=64,
+    bias_func=torch.exp,
+    slice_stride_min=1,
+    slice_stride_max=8,
+    slice_prob=0,
+    slice_axes=None,
+    normalize=True,
+    gamma=0.5,
+    one_hot=True,
+    half_res=False,
+    seeds={},
+    return_im=True,
+    return_map=True,
+    return_vel=False,
+    return_def=False,
+    return_aff=False,
+    return_mean=False,
+    return_bias=False,
+    id=0,
+):
+    """Build model that augments label maps and synthesizes images from them.
+
+    Parameters:
+        labels_in: All possible input label values as an iterable. Passing a dictionary will remap
+            input labels to the generation labels defined by the dictionary values, for example to
+            draw the same intensity for left and right cortex. Generation labels must be hashable
+            but not necessarily numeric. Remapping has no effect on the output labels.
+        labels_out: Subset of the input labels to include in the output label maps, as an iterable.
+            Passing a dictionary will remap the included input labels, for example to GM, WM, and
+            CSF. Any input label missing in `labels_out` will be set to 0 (background) or excluded
+            if one-hot encoding. None means the output labels will be the same as the input labels.
+            Output labels must be numeric.
+        in_shape: Spatial dimensions of the input label maps as an iterable.
+        out_shape: Spatial dimensions of the outputs as an iterable. Inputs will be symmetrically
+            cropped or zero-padded to fit. None means `in_shape`.
+        input_model: Model whose outputs will be used as data inputs, and whose inputs will be used
+            as inputs to the returned model.
+        num_chan: Number of image channels to synthesize.
+        aff_shift: Upper bound on the magnitude of translations, drawn uniformly in voxels.
+        aff_rotate: Upper bound on the magnitude of rotations, drawn uniformly in degrees.
+        aff_scale: Upper bound on the difference of the scaling magnitude from 1, drawn uniformly.
+        aff_shear: Upper bound on the shearing magnitude, drawn uniformly.
+        aff_normal_shift: Sample translations normally, with `aff_shift` as SD.
+        aff_normal_rotate: Sample rotation angles normally, with `aff_rotate` as SD.
+        aff_normal_scale: Sample scaling normally, with `aff_scale` as SD, truncating beyond 2 SDs.
+        aff_normal_shear: Sample shearing normally, with `aff_shear` as SD.
+        axes_flip: Randomly flip axes of the label map before generating the image. Should not be
+            used with lateralized labels.
+        axes_swap: Randomly permute axes of the label map before generating the image. Should not
+            be used with lateralized labels. Requires an isotropic output shape.
+        warp_min: Lower bound on the SDs used when drawing the SVF.
+        warp_max: Upper bound on the SDs used when drawing the SVF.
+        warp_zero_mean: Ensure that the SVF components have zero mean.
+        crop_min: Lower bound on the proportion of the FOV to crop.
+        crop_max: Upper bound on the proportion of the FOV to crop.
+        crop_prob: Probability that we crop the FOV along an axis.
+        crop_axes: Axes from which to draw for FOV cropping. None means all spatial axes.
+        mean_min: List of lower bounds on the intensities drawn for each label. None means 0.
+        mean_max: List of upper bounds on the intensities drawn for each label. None means 1.
+        noise_min: Lower bound on the noise SD relative to the max image intensity, 0.1 means 10%.
+        noise_max: Upper bound on the noise SD relative to the max image intensity, 0.1 means 10%.
+        zero_background: Probability that we set the background to zero.
+        blur_min: Lower bound on the smoothing SDs. Can be a scalar or list.
+        blur_max: Upper bound on the smoothing SDs. Can be a scalar or list.
+        bias_min: Lower bound on the bias sampling SDs.
+        bias_max: Upper bound on the bias sampling SDs.
+        bias_blur_min: Lower bound on the bias smoothing FWHM.
+        bias_blur_max: Upper bound on the bias smoothing FWHM.
+        bias_func: Function applied voxel-wise to condition the bias field.
+        slice_stride_min: Lower bound on slice thickness in original voxel units.
+        slice_stride_max: Upper bound on slice thickness in original voxel units.
+        slice_prob: Probability that we subsample to create thick slices.
+        slice_axes: Axes from which to draw slice normal direction. None means all spatial axes.
+        normalize: Min-max normalize the image.
+        gamma: Maximum deviation of the gamma augmentation exponent from 1. Careful: without
+            normalization, you may attempt to compute random exponents of negative numbers.
+        one_hot: One-hot encode the output label map.
+        seeds: Seeds for reproducible randomization or synchronization of components of this model
+            across multiple instances. Pass a dictionary linking specific component names to integer
+            seeds. If you pass an iterable of component names, seeds will be auto-generated. You
+            will have to check the source code to identify component names.
+        return_vel: Return the half-resolution SVF.
+        return_def: Return the combined displacement field.
+        return_aff: Return the (N+1)-by-(N+1) affine transformation matrix.
+        return_mean: Return an uncorrupted copy of the image.
+        return_bias: Return the applied bias field.
+        id: Model identifier used to create unique layer names.
+
+    Returns:
+        Label-augmentation and image-synthesis model.
+
+    If you find this model useful, please cite:
+        M Hoffmann, B Billot, DN Greve, JE Iglesias, B Fischl, AV Dalca
+        SynthMorph: learning contrast-invariant registration without acquired images
+        IEEE Transactions on Medical Imaging (TMI), 41 (3), 543-558, 2022
+        https://doi.org/10.1109/TMI.2021.3116879
+
+        Anatomy-specific acquisition-agnostic affine registration learned from fictitious images
+        M Hoffmann, A Hoopes, B Fischl*, AV Dalca* (*equal contribution)
+        SPIE Medical Imaging: Image Processing, 12464, p 1246402, 2023
+        https://doi.org/10.1117/12.2653251
+    """
+    compute_type = torch.get_default_dtype
+    integer_type = torch.int32
+
+    # Seeds
+    np_rng = np.random.default_rng(None)
+    default_seed = lambda: np_rng.integers(np.iinfo(int).max).item()
+    rng = lambda x: torch.Generator(device=device).manual_seed(x)
+
+    if isinstance(seeds, str):
+        seeds = [seeds]
+    if not isinstance(seeds, dict):
+        seeds = {f: hash(f) for f in seeds}
+
+    batch_size = 1
+    num_dim = len(labels.shape)
+    in_shape = labels.shape
+    if out_shape is None:
+        out_shape = in_shape
+    in_shape, out_shape = map(np.asarray, (in_shape, out_shape))
+
+    # Add new axes, Torch format
+    labels = labels.unsqueeze(0).unsqueeze(1)
+    labels = labels.expand(batch_size, -1, *[-1] * num_dim)
+    labels_shape_indices = np.arange(len(labels.shape))
+
+    # Transform labels into [0, 1, ..., N-1].
+    labels = labels.to(dtype=torch.int32, device=device)
+    in_label_list = labels.unique()
+    num_in_labels = len(in_label_list)
+
+    in_lut = torch.zeros(size=(torch.max(in_label_list) + 1,), dtype=torch.int32, device=device)
+    for i, lab in enumerate(in_label_list):
+        in_lut[lab] = i
+    labels = in_lut[labels] # tf.gather(in_lut, indices=labels)
+    
+
     outputs = {'image': image, 'label': labels}
     if return_vel:
         outputs['vel'] = vel_field
