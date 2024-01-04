@@ -6,6 +6,7 @@ import torch.nn.functional as F
 import pytorch_lightning as pl
 from torch.distributions.normal import Normal
 from . import layers
+from . import utils
 
 def kaiming_init(
     module: nn.Module,
@@ -25,6 +26,56 @@ def kaiming_init(
         nn.init.constant_(module.bias, bias)
 
 
+class ConvBlock(nn.Module):
+    """
+    Specific convolutional block followed by leakyrelu for unet.
+    """
+
+    def __init__(self, ndims, in_channels, out_channels, stride=1):
+        super().__init__()
+
+        Conv = getattr(nn, 'Conv%dd' % ndims)
+        self.main = Conv(
+            in_channels=in_channels, 
+            out_channels=out_channels, 
+            kernel_size=3, 
+            stride=stride, 
+            padding='same',
+        )
+        kaiming_init(module=self.main, distribution='normal')
+        self.activation = nn.LeakyReLU(0.2)
+
+    def forward(self, x):
+        out = self.main(x)
+        out = self.activation(out)
+        return out
+
+class ConvDropBlock(nn.Module):
+    """
+    Specific convolutional block followed by leakyrelu for affine feature detector.
+    """
+
+    def __init__(self, ndims, in_channels, out_channels, stride=1, dropout=0):
+        super().__init__()
+
+        Conv = getattr(nn, f'Conv{ndims}d')
+        Drop = getattr(nn, f'Dropout{ndims}d')
+        self.main = Conv(
+            in_channels=in_channels, 
+            out_channels=out_channels, 
+            kernel_size=3, 
+            stride=stride, 
+            padding='same',
+        )
+        kaiming_init(module=self.main, distribution='normal')
+        self.dropout  = Drop(dropout)
+        self.activation = nn.LeakyReLU(0.2)
+
+    def forward(self, x):
+        out = self.main(x)
+        out = self.activation(out)
+        return out
+
 class Unet(nn.Module):
     """
     A unet architecture. Layer features can be specified directly as a list of encoder and decoder
@@ -39,7 +90,7 @@ class Unet(nn.Module):
                  infeats=None,
                  nb_features=None,
                  nb_levels=None,
-                 max_pool=2,
+                 max_pool=2,    
                  feat_mult=1,
                  nb_conv_per_level=1,
                  half_res=False):
@@ -173,12 +224,11 @@ class VxmDense(nn.Module):
                  unet_feat_mult=1,
                  nb_unet_conv_per_level=1,
                  int_steps=7,
-                 int_downsize=2,
+                 int_resolution=2,
                  bidir=False,
                  use_probs=False,
                  src_feats=1,
-                 trg_feats=1,
-                 unet_half_res=False):
+                 trg_feats=1,):
         """ 
         Parameters:
             inshape: Input shape. e.g. (192, 192, 192)
@@ -193,14 +243,12 @@ class VxmDense(nn.Module):
             nb_unet_conv_per_level: Number of convolutions per unet level. Default is 1.
             int_steps: Number of flow integration steps. The warp is non-diffeomorphic when this 
                 value is 0.
-            int_downsize: Integer specifying the flow downsample factor for vector integration. 
-                The flow field is not downsampled when this value is 1.
+            int_resolution: Resolution (relative voxel size) of the flow field during
+                vector integration. Default is 2.
             bidir: Enable bidirectional cost function. Default is False.
             use_probs: Use probabilities in flow field. Default is False.
             src_feats: Number of source image features. Default is 1.
             trg_feats: Number of target image features. Default is 1.
-            unet_half_res: Skip the last unet decoder upsampling. Requires that int_downsize=2. 
-                Default is False.
         """
         
         super().__init__()
@@ -213,6 +261,7 @@ class VxmDense(nn.Module):
         assert ndims in [1, 2, 3], 'ndims should be one of 1, 2, or 3. found: %d' % ndims
 
         # configure core unet model
+        unet_half_res = True if int_resolution == 2 else False
         self.unet_model = Unet(
             inshape,
             infeats=(src_feats + trg_feats),
@@ -237,9 +286,9 @@ class VxmDense(nn.Module):
                 'Flow variance has not been implemented in pytorch - set use_probs to False')
 
         # configure optional resize layers (downsize)
-        if not unet_half_res and int_steps > 0 and int_downsize > 1:
-            # self.resize = layers.ResizeTransform(int_downsize, ndims)
-            self.resize = layers.RescaleTransform(1 / int_downsize)
+        if int_steps > 0 and int_resolution > 1:
+            # self.resize = layers.ResizeTransform(int_resolution, ndims)
+            self.resize = layers.RescaleTransform(1 / int_resolution)
             
         else:
             self.resize = None
@@ -248,20 +297,16 @@ class VxmDense(nn.Module):
         self.bidir = bidir
 
         # configure optional integration layer for diffeomorphic warp
-        down_shape = [int(dim / int_downsize) for dim in inshape]
-        # self.integrate = layers.VecInt(down_shape, int_steps) if int_steps > 0 else None
-        self.integrate = layers.VecInt(int_steps=int_steps)
+        self.integrate = layers.VecInt(int_steps=int_steps) if int_steps > 0 else None
         
         # resize to full res
-        if int_steps > 0 and int_downsize > 1:
-            # self.fullsize = layers.ResizeTransform(1 / int_downsize, ndims)
-            self.fullsize = layers.RescaleTransform(int_downsize)
+        if int_steps > 0 and int_resolution > 1:
+            self.fullsize = layers.RescaleTransform(int_resolution)
             
         else:
             self.fullsize = None
             
         # configure transformer
-        # self.transformer = layers.SpatialTransformer(inshape)
         self.transformer = layers.SpatialTransformer('linear', 'ij')
 
         
@@ -276,12 +321,13 @@ class VxmDense(nn.Module):
         # concatenate inputs and propagate unet
         x = torch.cat([source, target], dim=1)
         x = self.unet_model(x)
-        
+    
         # transform into flow field
         flow_field = self.flow(x)
         
         # resize flow for integration
         pos_flow = flow_field
+
         if self.resize:
             pos_flow = self.resize(pos_flow)
 
@@ -310,28 +356,161 @@ class VxmDense(nn.Module):
         }
 
         return results
-    
-    
-class ConvBlock(nn.Module):
-    """
-    Specific convolutional block followed by leakyrelu for unet.
-    """
 
-    def __init__(self, ndims, in_channels, out_channels, stride=1):
+
+class VxmAffineFeatureDetector(nn.Module):
+    """
+    SynthMorph network for symmetric affine or rigid registration of two images.
+
+    References:
+        Anatomy-specific acquisition-agnostic affine registration learned from fictitious images
+        M Hoffmann, A Hoopes, B Fischl*, AV Dalca* (*equal contribution)
+        SPIE Medical Imaging: Image Processing, 12464, p 1246402, 2023
+        https://doi.org/10.1117/12.265325
+
+    """
+    def __init__(
+        self,
+        in_shape=None,
+        input_model=None,
+        num_chan=1,
+        num_feat=64,
+        enc_nf=[256] * 4,
+        dec_nf=[256] * 0,
+        add_nf=[256] * 4,
+        per_level=1,
+        dropout=0,
+        half_res=True,
+        weighted=True,
+        rigid=False,
+        make_dense=True,
+        bidir=False,
+        return_trans_to_mid_space=False,
+        return_trans_to_half_res=False,
+        return_moved=False,
+        return_feat=False
+    ) -> None:
+        """
+        Internally, the model computes transforms in a centered frame at full resolution. However,
+        matrix transforms returned with `make_dense=False` operate on zero-based indices to
+        facilitate composition, in particular when changing resolution. Thus, any subsequent
+        `SpatialTransformer` or `ComposeTransform` calls require `shift_center=False`.
+
+        While the returned transforms always apply to full-resolution images, you can use the flag
+        `return_trans_to_half_res=True` to obtain transforms producing outputs at half resolution,
+        for faster training. Careful: this requires setting the adequate output `shape` for
+        `SpatialTransformer` when applying transforms.
+
+        Parameters:
+            in_shape: Spatial dimensions of a single input image
+            input_model: Model whose outputs will be used as data inputs, and whose inputs will be
+                used as inputs to the returned model, as an alternative to specifying `in_shape`.
+            num_chan: Number of input-image channels.
+            num_feat: Number of output feature maps giving rise to centers of mass.
+            enc_nf: Number of convolutional encoder filters at each level, as an iterable. The
+                model will downsample by a factor of 2 after each convolution.
+            dec_nf: Number of convolutional decoder filters at each level, as an iterable. The
+                model will upsample by a factor of 2 after each convolution.
+            add_nf: Number of additional convolutional filters applied at the end, as an iterable.
+                The model will maintain the resolution after these convolutions.
+            per_level: Number of encoding and decoding convolution repeats.
+            dropout: Spatial dropout rate applied after each convolution.
+            half_res: For efficiency, halve the input-image resolution before registration.
+            weighted: Fit transforms using weighted instead of ordinary least squares.
+            rigid: Discard scaling and shear to return a rigid transform.
+            make_dense: Return a dense displacement field instead of a matrix transform.
+            bidir: In addition to the transform from image 1 to image 2, also return the inverse.
+                The transforms apply to full-resolution images but may end half way and/or at half
+                resolution, depending on `return_trans_to_mid_space`, `return_trans_to_half_res`.
+                Also return pairs of moved images and feature maps, if requested.
+            return_trans_to_mid_space: Return transforms from the input images to the mid-space.
+                Careful: your loss inputs must reflect this choice, and training with large
+                transforms may lead to NaN loss values. You can change this option after training.
+            return_trans_to_half_res: Return transforms from input images at full resolution to
+                output images at half resolution. You can change this option after training.
+            return_moved: Append the transformed images to the model outputs.
+            return_feat: Append the output feature maps to the model outputs.
+
+        """
         super().__init__()
 
-        Conv = getattr(nn, 'Conv%dd' % ndims)
-        self.main = Conv(
-            in_channels=in_channels, 
-            out_channels=out_channels, 
-            kernel_size=3, 
-            stride=stride, 
-            padding='same',
-        )
-        kaiming_init(module=self.main, distribution='normal')
-        self.activation = nn.LeakyReLU(0.2)
+        # Dimensions
+        shape_full = in_shape
+        shape_half = shape_full // 2
+        ndims = len(shape_full)
+        assert ndims in (2, 3), 'only 2D and 3D supported'
+        assert not return_trans_to_half_res or half_res, 'only for `half_res=True`'
+        
+        # Layers
+        conv = getattr(nn, f'Conv{ndims}d')
+        maxpool = getattr(nn, f'Maxpool{ndims}d')
+        
+        dtype = torch.get_default_dtype()
 
-    def forward(self, x):
-        out = self.main(x)
-        out = self.activation(out)
-        return out
+        # Detector inputs
+        self.halfres_st = layers.SpatialTransformer(fill_value=0, shape=shape_half, shift_center=False)
+
+        # Downsampling and upsampling operations
+        maxpool_scale = [2] * len(enc_nf)
+        self.pooling = [maxpool(kernel_size=ms, dtype=torch.float32) for ms in maxpool_scale]
+        self.upsampling = [nn.Upsample(scale_factor=ms, mode='nearest') for ms in maxpool_scale]
+
+        # Feature detector: encoder.
+        prev_nf = num_chan
+        self.encoder = nn.ModuleList()
+        for nf in enc_nf:
+            blocks = nn.ModuleList()
+            for _ in range(per_level):
+                blocks.append(
+                    ConvDropBlock(
+                        ndims=ndims, 
+                        in_channels=prev_nf, 
+                        out_channels=nf, 
+                        dropout=dropout
+                    )
+                )
+                prev_nf = nf
+            self.encoder.append(blocks)
+
+        # Feature detector: decoder
+        self.decoder = nn.ModuleList()
+        for nf in dec_nf:
+            blocks = nn.ModuleList()
+            for _ in range(per_level):
+                blocks.append(
+                    ConvDropBlock(
+                        ndims=ndims, 
+                        in_channels=prev_nf, 
+                        out_channels=nf, 
+                        dropout=dropout
+                    )
+                )
+                prev_nf = nf
+            self.decoder.append(blocks)
+        
+        # Additional convolutions
+        self.remaining = nn.ModuleList()
+        for nf in add_nf:
+            self.remaining.append(
+                ConvDropBlock(
+                    ndims=ndims, 
+                    in_channels=prev_nf, 
+                    out_channels=nf, 
+                    dropout=dropout
+                )
+            )
+            prev_nf = nf
+
+        # Output features
+        out_args = dict(kernel_size=3, padding='same')
+        self.out = nn.ModuleList()
+        self.out.append(conv(prev_nf, num_feat, **out_args))
+        self.out.append(nn.ReLU())
+
+        barycenter_args = dict(axes=range(1, ndims + 1), normalize=True, shift_center=True, dtype=dtype)
+        self.barycenter = lambda x: utils.barycenter(x, **barycenter_args) * shape_full
+        
+
+    def forward(self):
+        return
+        
