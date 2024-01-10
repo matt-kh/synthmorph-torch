@@ -254,6 +254,38 @@ def validate_affine_shape(shape):
         raise ValueError(f'Affine matrix must be of shape (2, 3) or (3, 4), got {actual}.')
 
 
+def make_square_affine(mat):
+    """
+    Converts a [N, N+1] affine matrix to square shape [N+1, N+1].
+
+    Parameters:
+        mat: Affine matrix of shape [..., N, N+1].
+    """
+    validate_affine_shape(mat.shape)
+
+    # Support dynamic shapes by storing in tensors
+    shape_input = mat.shape
+    shape_batch = shape_input[:2]
+    shape_zeros = torch.cat((shape_batch, (1,), shape_input[-2:-1]), dim=0)
+    shape_one = torch.cat((shape_batch, (1, 1)), dim=0)
+
+    # Append last row
+    zeros = torch.zeros(size=shape_zeros, dtype=mat.dtype)
+    one = torch.ones(size=shape_one, dtype=mat.dtype)
+    row = torch.cat((zeros, one), dim=-1)
+    return torch.cat((mat, row), dim=-2)
+
+
+def invert_affine(mat):
+    """
+    Compute the multiplicative inverse of an affine matrix.
+
+    Parameters:
+        mat: Affine matrix of shape [..., N, N+1].
+    """
+    return torch.inverse(make_square_affine(mat))[..., :-1, :]
+
+
 def transform(vol, loc_shift, interp_method='linear', 
               indexing='ij', fill_value=None):
     """
@@ -303,6 +335,64 @@ def transform(vol, loc_shift, interp_method='linear',
     
     # Test single
     return interpn(vol, loc, interp_method=interp_method, fill_value=fill_value)
+
+
+def compose(transforms, interp_method='linear', shift_center=True):
+    """
+    Compose a single transform from a series of transforms.
+
+    Supports both dense and affine transforms, and returns a dense transform unless all
+    inputs are affine. The list of transforms to compose should be in the order in which
+    they would be individually applied to an image. For example, given transforms A, B,
+    and C, to compose a single transform T, where T(x) = C(B(A(x))), the appropriate
+    function call is:
+
+    T = compose([A, B, C])
+
+    Parameters:
+        transforms: List of affine and/or dense transforms to compose.
+        interp_method: Interpolation method. Must be 'linear' or 'nearest'.
+        shift_center: Shift grid to image center.
+
+    Returns:
+        Composed affine or dense transform.
+
+    Notes:
+        There used to be an argument for choosing between matrix ('ij') and Cartesian ('xy')
+        indexing. Due to inconsistencies in how some functions and layers handled xy-indexing, we
+        removed it in favor of default ij-indexing to minimize the potential for confusion.
+
+    """
+    if len(transforms) < 2:
+        raise ValueError("Compose transform must include 2 or more transforms")
+    
+    def ensure_square_affine(matrix):
+        if matrix.shape[-1] != matrix.shape[-2]:
+           return make_square_affine(matrix)
+        return matrix
+    
+    curr = transforms[-1]
+    for tr in reversed(transforms[:-1]):
+                # Dense warp on left: interpolate.
+        if not is_affine_shape(tr.shape):
+            if is_affine_shape(curr.shape):
+                curr = affine_to_dense_shift(curr, shape=next.shape[:-1], shift_center=shift_center)
+            curr = curr + transform(vol=tr, loc_shift=curr, interp_method=interp_method)
+        
+        # Matrix on left, dense warp on right: matrix-vector product.
+        elif not is_affine_shape(curr.shape):
+            curr = affine_to_dense_shift(tr,
+                                         shape=curr.shape[:-1],
+                                         shift_center=shift_center,
+                                         warp_right=curr)
+            
+         # No dense warp: matrix product.
+        else:
+            next = ensure_square_affine(next)
+            curr = ensure_square_affine(curr)
+            curr = torch.matmul(next, curr)[:-1]
+
+    return curr
 
 
 def integrate_vec(vec, nb_steps):
@@ -657,6 +747,345 @@ def barycenter(x, axes=None, normalize=False, shift_center=False, dtype=torch.fl
     )
 
     return x.to(dtype=dtype) if dtype != compute_dtype else x
+
+
+def angles_to_rotation_matrix(ang, deg=True, ndims=3, device=device):
+    """
+    Construct N-dimensional rotation matrices from angles, where N is 2 or
+    3. The direction of rotation for all axes follows the right-hand rule: the
+    thumb being the rotation axis, a positive angle defines a rotation in the
+    direction pointed to by the other fingers. Rotations are intrinsic, that
+    is, applied in the body-centered frame of reference. The function supports
+    inputs with or without batch dimensions.
+
+    In 3D, rotations are applied in the order ``R = X @ Y @ Z``, where X, Y,
+    and Z are matrices defining rotations about the x, y, and z-axis,
+    respectively.
+
+    Arguments:
+        ang: Array-like input angles of shape (..., M), specifying rotations
+            about the first M axes of space. M must not exceed N. Any missing
+            angles will be set to zero. Lists and tuples will be stacked along
+            the last dimension.
+        deg: Interpret `ang` as angles in degrees instead of radians.
+        ndims: Number of spatial dimensions. Must be 2 or 3.
+
+    Returns:
+        mat: Rotation matrices of shape (..., N, N) constructed from `ang`.
+
+    If you find this function useful, please consider citing:
+        M Hoffmann, B Billot, DN Greve, JE Iglesias, B Fischl, AV Dalca
+        SynthMorph: learning contrast-invariant registration without acquired images
+        IEEE Transactions on Medical Imaging (TMI), 41 (3), 543-558, 2022
+        https://doi.org/10.1109/TMI.2021.3116879
+    """
+    if ndims not in (2, 3):
+        raise ValueError(f'Affine matrix must be 2D or 3D, but got ndims of {ndims}.')
+    
+    if isinstance(ang, (list, tuple)):
+        ang = torch.stack(ang, dim=-1)
+    
+    if not isinstance(par, torch.Tensor) or not par.dtype.is_floating_point():
+        par = torch.as_tensor(par, dtype=torch.float32, device=device)
+    
+    # Add dimension to scalar
+    if len(par.shape) == 0:
+        par = par.reshape(shape=(1,))
+    
+    # Validate shape
+        num_ang = 1 if ndims == 2 else 3
+        shape = list(par.shape)
+        if shape[-1] > num_ang:
+            raise ValueError(f'Number of angles exceeds value {num_ang} expected for dimensionality.')
+        
+   # Set missing angles to zero
+    width = torch.zeros((len(shape), 2), dtypee=torch.int32, device=device)
+    width[-1, -1] = max(num_ang -  shape[-1], 0)
+    ang = nnf.pad(ang, pad=width, mode='constant')
+
+    # Compute since and cosine
+    if deg:
+        ang *= np.pi / 180
+    c = torch.split(torch.cos(ang), split_size_or_sections=num_ang, dim=-1)
+    s = torch.split(torch.sin(ang), split_size_or_sections=num_ang, dim=-1)
+
+    # Construct matrices
+    if ndims == 2:
+        out = torch.stack((
+            torch.cat([c[0], -s[0]], dim=-1),
+            torch.cat([s[0], c[0]], dim=-1),
+        ), dim=-2)
+    
+    else:
+        one, zero = torch.ones_like(c[0]), torch.zeros_like(c[0])
+        rot_x = torch.stack((
+            torch.concat([one, zero, zero], dim=-1),
+            torch.cat([zero, c[0], -s[0]], dim=-1),
+            torch.cat([zero, s[0], c[0]], dim=-1)
+        ), dim=-2)
+        
+        rot_y = torch.stack((
+            torch.cat(c[1], zero, s[1], dim=-1),
+            torch.cat([zero, one, zero], dim=-1),
+            torch.cat([-s[1], zero, c[1]], dim=-1)
+        ), dim=-2)
+
+        rot_z = torch.stack((
+            torch.cat([c[2], -s[2], zero], dim=-1),
+            torch.cat([s[2], c[2], zero], dim=-1),
+            torch.cat([zero, zero, one], dim=-1),
+        ), dim=-2)
+
+        out = rot_x @ (rot_y @ rot_z)
+
+    return out.squeeze() if len(shape) < 2 else out
+
+
+def params_to_affine_matrix(
+    par,
+    deg=True,
+    shift_scale=False,
+    last_row=False,
+    ndims=3,
+    device=device,
+):
+    """
+    Construct N-dimensional transformation matrices from affine parameters,
+    where N is 2 or 3. The transforms operate in a right-handed frame of
+    reference, with right-handed intrinsic rotations (see
+    angles_to_rotation_matrix for details), and are constructed by matrix
+    product ``T @ R @ S @ E``, where T, R, S, and E are matrices representing
+    translation, rotation, scale, and shear, respectively. The function
+    supports inputs with or without batch dimensions.
+
+    Arguments:
+        par: Array-like input parameters of shape (..., M), defining an affine
+            transformation in N-D space. The size M of the right-most dimension
+            must not exceed ``N * (N + 1)``. This axis defines, in order:
+            translations, rotations, scaling, and shearing parameters. In 3D,
+            for example, the first three indices specify translations along the
+            x, y, and z-axis, and similarly for the remaining parameters. Any
+            missing parameters will bet set to identity. Lists and tuples will
+            be stacked along the last dimension.
+        deg: Interpret input angles as specified in degrees instead of radians.
+        shift_scale: Add 1 to any specified scaling parameters. May be
+            desirable when the input parameters are estimated by a network.
+        last_row: Append the last row and return a full matrix.
+        ndims: Number of dimensions. Must be 2 or 3.
+
+    Returns:
+        mat: Affine transformation matrices of shape (..., N, N + 1) or
+            (..., N + 1, N + 1), depending on `last_row`. The left-most
+            dimensions depend on the input shape.
+
+    Author:
+        mu40
+
+    If you find this function useful, please consider citing:
+        M Hoffmann, B Billot, DN Greve, JE Iglesias, B Fischl, AV Dalca
+        SynthMorph: learning contrast-invariant registration without acquired images
+        IEEE Transactions on Medical Imaging (TMI), 41 (3), 543-558, 2022
+        https://doi.org/10.1109/TMI.2021.3116879
+    """
+    if ndims not in (2, 3):
+        raise ValueError(f'Affine matrix must be 2D or 3D, but got ndims of {ndims}.')
+    
+    if isinstance(par, (list, tuple)):
+        par = torch.stack(par, dim=-1)
+    
+    if not isinstance(par, torch.Tensor) or not par.dtype.is_floating_point():
+        par = torch.as_tensor(par, dtype=torch.float32)
+    
+    # Add dimension to scalar
+    if len(par.shape) == 0:
+        par = par.reshape(shape=(1,))
+
+    # Validate shape
+    num_par = 6 if ndims == 2 else 12
+    shape = list(par.shape)
+    if shape[-1] > num_par:
+        raise ValueError(f'Number of params exceeds value {num_par} expected for dimensionality.')
+
+    # Set defaults if incomplete and split by type
+    width = torch.zeros(len(shape, 2), dtype=torch.int32, device=device)
+    splits = (2, 1) * 2 if ndims == 2 else (3,) * 4
+    for i in (2, 3, 4):
+        width[-1, -1] = max(sum(splits[:i]) - shape[-1], 0)
+        default = 1. if i == 3 and not shift_scale else 0.
+        par = nnf.pad(par, padding=width, mode='constant', value=default)
+        shape = list(par.shape)
+    shift, rot, scale, shear = torch.split(par, split_size_or_sections=splits, dim=-1)
+
+    # Construct shear matrix
+    s = torch.split(shear, split_size_or_sections=splits[-1], dim=-1)
+    one, zero = torch.ones_like(s[0]), torch.zeros_like(s[0])
+    if ndims == 2:
+        mat_shear = torch.stack((
+            torch.cat([one, s[0]], dim=-1),
+            torch.cat([zero, one], dim=-1),
+        ), dim=-2)
+    else:
+        mat_shear = torch.stack((
+            torch.cat([one, s[0], s[1]], dim=-1),
+            torch.cat([zero, one, s[2]], dim=-1),
+            torch.cat([zero, zero, one], dim=-1),
+        ), dim=-2)
+
+    mat_scale = torch.diag(scale + 1. if shift_scale else scale, diagonal=0)
+    mat_rot = angles_to_rotation_matrix(rot, deg=deg, ndims=ndims)
+    out = mat_rot @ (mat_scale @ mat_shear)
+
+    # Append translations
+    shift = shift.unsqueeze(dim=-1)
+    out = torch.cat([out, shift], dim=-1)
+
+    # Append last row: store shapes as tensors to support batched inputs
+    if last_row:
+        shape_batch = shift.shape[:-2]
+        shape_zeros = torch.cat([shape_batch, (1,), splits[:1]], dim=0)
+        zeros = torch.zeros(shape_zeros, dtype=shift.dtype, device=device)
+        shape_one = torch.cat([shape_batch, (1,), (1,)], dim=0)
+        one = torch.ones(shape_one, dtype=shift.dtype, device=device)
+        row = torch.cat([zeros, one], dim=-1)
+        out = torch.concat([out, row], dim=-2)
+    
+    return out.squeeze() if len(shape) < 2 else out
+
+
+def draw_affine_params(
+    shift=None,
+    rot=None,
+    scale=None,
+    shear=None,
+    normal_shift=False,
+    normal_rot=False,
+    normal_scale=False,
+    normal_shear=False,
+    shift_scale=False,
+    ndims=3,
+    batch_shape=None,
+    concat=True,
+    dtype=torch.float32,
+    seeds={}
+):
+    
+    """
+    Draw translation, rotation, scaling and shearing parameters defining an affine transform in
+    N-dimensional space, where N is 2 or 3. Choose parameters wisely: there is no check for
+    negative or zero scaling!
+
+    Parameters:
+        shift: Translation sampling range x around identity. Values will be sampled uniformly from
+            [-x, x]. When sampling from a normal distribution, x is the standard deviation (SD).
+            The same x will be used for each dimension, unless an iterable of length N is passed,
+            specifying a value separately for each axis. None means 0.
+        rot: Rotation sampling range (see `shift`). Accepts only one value in 2D.
+        scale: Scaling sampling range x. Parameters will be sampled around identity as for `shift`,
+            unless `shift_scale` is set. When sampling normally, scaling parameters will be
+            truncated beyond two standard deviations.
+        shear: Shear sampling range (see `shift`). Accepts only one value in 2D.
+        normal_shift: Sample translations normally rather than uniformly.
+        normal_rot: See `normal_shift`.
+        normal_scale: Draw scaling parameters from a normal distribution, truncating beyond 2 SDs.
+        normal_shear: See `normal_shift`.
+        shift_scale: Add 1 to any drawn scaling parameter When sampling uniformly, this will
+            result in scaling parameters falling in [1 - x, 1 + x] instead of [-x, x].
+        ndims: Number of dimensions. Must be 2 or 3.
+        normal: Sample parameters normally instead of uniformly.
+        batch_shape: A list or tuple. If provided, the output will have leading batch dimensions.
+        concat: Concatenate the output along the last axis to return a single tensor.
+        dtype: Floating-point output data type.
+        seeds: Dictionary of integers for reproducible randomization. Keywords must be in ('shift',
+            'rot', 'scale', 'shear').
+
+    Returns:
+        A tuple of tensors with shapes (..., N), (..., M), (..., N), and (..., M) defining
+        translation, rotation, scaling, and shear, respectively, where M is 3 in 3D and 1 in 2D.
+        With `concat=True`, the function will concatenate the output along the last dimension.
+
+    See also:
+        layers.DrawAffineParams
+        layers.ParamsToAffineMatrix
+        params_to_affine_matrix
+
+    If you find this function useful, please cite:
+        Anatomy-specific acquisition-agnostic affine registration learned from fictitious images
+        M Hoffmann, A Hoopes, B Fischl*, AV Dalca* (*equal contribution)
+        SPIE Medical Imaging: Image Processing, 12464, p 1246402, 2023
+        https://doi.org/10.1117/12.2653251
+    """
+    assert ndims in (2, 3), 'only 2D and 3D supported'
+    n = 1 if ndims == 2 else 3
+
+    # Look-up tables
+    splits = dict(shift=ndims, rot=n, scale=ndims, shear=n)
+    inputs = dict(shift=shift, rot=rot, scale=scale, shear=shear)
+    trunc = dict(shift=False, rot=False, scale=True, shear=False)
+    normal = dict(shift=normal_shift, rot=normal_rot, scale=normal_scale, shear=normal_shear)
+
+    # Normalize inputs
+    shapes = {}
+    ranges = {}
+    for k, n in splits.items():
+        x = torch.ravel(0 if inputs[k] is None else inputs[k])
+        if len(x) == 1:
+            x = torch.repeat_interleave(x, repeats=n)
+        assert len(x) == n, f'unexpected number of parameters {len(x)} ({k})'
+        ranges[k] = x
+        shapes[k] = (n,) if batch_shape is None else torch.cat((batch_shape, [n]), dim=0)
+    
+    def sample(lim, shape, normal, trunc, seed):
+        prop = dict(dtype=dtype, seed=seed, shape=shape)
+        if normal:
+            func = 'truncated_normal' if trunc else 'normal'
+            prop.update(stddev=lim)
+        else:   # uniform
+            func = 'uniform'
+            prop.update(minval=-lim, maxval=lim)
+
+
+def fit_affine(x_source, x_target, weights=None):
+    """Fit an affine transform between two sets of corresponding points.
+
+    Fit an N-dimensional affine transform between two sets of M corresponding
+    points in an ordinary or weighted least-squares sense. Note that when
+    working with images, source coordinates correspond to the target image and
+    vice versa.
+
+    Arguments:
+        x_source: Array-like source coordinates of shape (..., M, N).
+        x_target: Array-like target coordinates of shape (..., M, N).
+        weights: Optional array-like weights of shape (..., M) or (..., M, 1).
+
+    Returns:
+        mat: Affine transformation matrix of shape (..., N, N + 1), fitted such
+            that ``x_t = mat[..., :-1] @ x_s + mat[..., -1:]``, where x_s is
+            ``x_s = tf.linalg.matrix_transpose(x_t)``, and similarly for x_t
+            and `x_target`. The last row of `mat` is omitted as it is always
+            ``(*[0] * N, 1)``.
+
+    Author:
+        mu40
+
+    If you find this function useful, please consider citing:
+        M Hoffmann, B Billot, DN Greve, JE Iglesias, B Fischl, AV Dalca
+        SynthMorph: learning contrast-invariant registration without acquired images
+        IEEE Transactions on Medical Imaging (TMI), 41 (3), 543-558, 2022
+        https://doi.org/10.1109/TMI.2021.3116879
+    """
+    shape = torch.cat((x_target.shape[:-1], [1]), dim=0)
+    ones = torch.ones(size=shape, dtype=x_target.dtype)
+    x = torch.cat((x_target, ones), dim=-1)
+    x_transp = torch.transpose(x, 0, 1)
+    y = x_source
+
+    if weights is not None:
+        if len(weights.shape) == len(x.shape):
+            weights = weights[..., 0]
+        x_transp *= torch.unsqueeze(weights, dim=-2)
+    
+    beta = torch.inverse(x_transp @ x) @ x_transp @ y
+    return torch.transpose(beta, 0, 1)
 
 
 def divide_no_nan(x, y):
