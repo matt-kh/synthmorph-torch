@@ -80,8 +80,8 @@ def rotate(image, angle):
 def superimpose_circles(
     image, 
     pixel_value=255, 
-    size_range=(2, 4), 
-    dist_range=(50, 81), 
+    size_range=(0.05, 0.05), 
+    dist_range=(50, 51), 
     rotate=0,
     x_shift = 0,
     y_shift=0,
