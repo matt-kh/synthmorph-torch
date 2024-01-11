@@ -159,7 +159,7 @@ def labels_to_image(
     std_min=None,
     std_max=None,
     zero_background=0.2,
-    affine=False,
+    affine_args=None,
     warp_res=[16],
     warp_std=0.5,
     warp_modulate=True,
@@ -283,8 +283,15 @@ def labels_to_image(
         # Resampling.
         labels = layers.SpatialTransformer(interp_method='nearest', fill_value=0)([labels, def_field])
     
-    if affine:
-        aff_transformer = RandomAffine(degrees=0, translate=(0, 0.05), scale=(0.80, 0.90))
+    # Affine transformations
+    if affine_args is not None:
+        if not isinstance(affine_args, dict):
+            warnings.warn("Argument affine_args must be a dictionary to apply affine transformations")
+        rotate = affine_args.get("rotate", 0)
+        translate = affine_args.get("translate", None)
+        scale = affine_args.get("scale", None)
+        shear = affine_args.get("shear", None)
+        aff_transformer = RandomAffine(degrees=rotate, translate=translate, scale=scale, shear=shear)
         labels = aff_transformer(labels)
 
     labels = labels.to(torch.int32)
