@@ -243,7 +243,7 @@ def is_affine_shape(shape):
 def validate_affine_shape(shape):
     """
     Validates whether the given input shape represents a valid affine matrix.
-    Throws error if the shape is valid.
+    Throws error if the shape is invalid.
 
     Parameters:
         shape: List of integers of the form [..., N, N+1].

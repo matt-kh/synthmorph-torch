@@ -363,4 +363,153 @@ class RescaleValues(nn.Module):
 
     def forward(self, x):
         return x * self.resize
-                                                    
+
+
+class ComposeTransform(nn.Module):
+    """ 
+    Composes a single transform from a series of transforms.
+
+    Supports both dense and affine transforms, and returns a dense transform unless all
+    inputs are affine. The list of transforms to compose should be in the order in which
+    they would be individually applied to an image. For example, given transforms A, B,
+    and C, to compose a single transform T, where T(x) = C(B(A(x))), the appropriate
+    function call is:
+
+    T = ComposeTransform()([A, B, C])
+    """
+
+    def __init__(self, interp_method='linear', shift_center=True, **kwargs) -> None:
+        self.interp_method = interp_method
+        self.shift_center = shift_center
+        super().__init__(**kwargs)
+    
+    def get_config(self):
+        config = super().get_config.copy()
+        config.update({
+            'interp_method': self.interp_method,
+            'shift_center': self.shift_center,
+        })
+        return config
+
+    def build(self, input_shape, **kwargs):
+        # Sanity check on inputs
+        if not isinstance(input_shape, (list, tuple)):
+            raise Exception('ComposeTransform must be called for a list of transforms.')
+    
+    def forward(self, transforms):
+        """
+        Parameters:
+            transforms: List of affine or dense transforms to compose.
+        """
+        self.build(transforms)
+
+        if len(transforms) == 1:
+            return transforms[0]
+        
+        # Convert to TF shape
+        transforms_shape_indices = list(range(len(transforms[0].shape)))
+        transforms = [trf.permute(0, *transforms_shape_indices[2:], 1) for trf in transforms]
+        
+        compose = lambda trf: utils.compose(
+            trf,
+            interp_method=self.interp_method,
+            shift_center=self.shift_center
+        )
+
+        return compose(transforms)
+    
+
+class ParamsToAffineMatrix(nn.Module):
+    """
+    Constructs an affine transformation matrix from translation, rotation, scaling and shearing
+    parameters in 2D or 3D.
+
+    If you find this layer useful, please consider citing:
+        M Hoffmann, B Billot, DN Greve, JE Iglesias, B Fischl, AV Dalca
+        SynthMorph: learning contrast-invariant registration without acquired images
+        IEEE Transactions on Medical Imaging (TMI), 41 (3), 543-558, 2022
+        https://doi.org/10.1109/TMI.2021.3116879
+    """
+
+    def __init__(self, ndims=3, deg=True, shift_scale=False, last_row=False, **kwargs):
+        """
+        Parameters:
+            ndims: Dimensionality of transform matrices. Must be 2 or 3.
+            deg: Whether the input rotations are specified in degrees.
+            shift_scale: Add 1 to any specified scaling parameters. This may be desirable
+                when the parameters are estimated by a network.
+            last_row: Whether to return a full matrix, including the last row.
+        """
+        self.ndims = ndims
+        self.deg = deg
+        self.shift_scale = shift_scale
+        self.last_row = last_row
+        super().__init__(**kwargs)
+    
+    def get_config(self):
+        config = super().get_config().copy()
+        config.update({
+            'ndims': self.ndims,
+            'deg': self.deg,
+            'shift_scale': self.shift_scale,
+            'last_row': self.last_row,
+        })
+        return config
+    
+    def compute_output_shape(self, input_shape):
+        return (input_shape[0], self.ndims + int(self.last_row), self.ndims + 1)
+    
+    def forward(self, params):
+        """
+        Parameters:
+            params: Parameters as a vector which corresponds to translations, rotations, scaling
+                    and shear. The size of the last axis must not exceed (N, N+1), for N
+                    dimensions. If the size is less than that, the missing parameters will be
+                    set to the identity.
+        """
+        return utils.params_to_affine_matrix(
+            par=params,
+            deg=self.deg,
+            shift_scale=self.shift_scale,
+            ndims=self.ndims,
+            last_row=self.last_row
+        )
+
+
+class AffineToDenseShift(nn.Module):
+    """
+    Converts an affine transform to a dense shift transform.
+    """
+
+    def __init__(self, shape, shift_center=True, **kwargs):
+        """
+        Parameters:
+            shape: Target shape of dense shift
+        """
+        self.shape = shape
+        self.ndims = len(shape)
+        self.shift_center = shift_center
+        super().__init__(**kwargs)
+    
+    def get_config(self):
+        config = super().get_config().copy()
+        config.update({
+            'shape': self.shape,
+            'shift_center': self.shift_center,
+        })
+        return config
+    
+    def compute_output_shape(self, input_shape):
+        return (input_shape[0], *self.shape, self.ndims)
+
+    def build(self, input_shape):
+        utils.validate_affine_shape(input_shape)
+    
+    def forward(self, mat):
+        """
+        Parameters:
+            mat: Affine matrices of shape (B, N, N+1).
+        """
+        self.build()
+        return utils.affine_to_dense_shift(mat, self.shape, shift_center=self.shift_center)
+
