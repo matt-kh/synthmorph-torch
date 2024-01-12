@@ -952,6 +952,152 @@ def params_to_affine_matrix(
     return out.squeeze() if len(shape) < 2 else out
 
 
+def rotation_matrix_to_angles(mat, deg=True, device=device):
+    """Compute Euler angles from an N-dimensional rotation matrix.
+
+    We apply right-handed intrinsic rotations as R = X @ Y @ Z, where X, Y,
+    and Z are matrices describing rotations about the x, y, and z-axis,
+    respectively (see angles_to_rotation_matrix). Labeling these axes with
+    indices 1-3 in the 3D case, we decompose the matrix
+
+            [            c2*c3,             −c2*s3,      s2]
+        R = [ s1*s2*c3 + c1*s3,  −s1*s2*s3 + c1*c3,  −s1*c2],
+            [−c1*s2*c3 + s1*s3,   c1*s2*s3 + s1*c3,   c1*c2]
+
+    where si and ci are the sine and cosine of the angle of rotation about
+    axis i. When the angle of rotation about the y-axis is 90 or -90 degrees,
+    the system loses one degree of freedom, and the solution is not unique.
+    In this gimbal lock case, we set the angle `ang[0]` to zero and solve for
+    `ang[2]`.
+
+    Arguments:
+        mat: Array-like input matrix to derive rotation angles from, of shape
+            (..., N, N + 1) or (..., N + 1, N + 1), where N is 2 or 3.
+        deg: Return rotation angles in degrees instead of radians.
+
+    Returns:
+        ang: Tensor of shape (..., M) holding the derived rotation angles. The
+        size M of the right-most dimension is 3 in 3D and 1 in 2D.
+
+    If you find this function useful, please consider citing:
+        M Hoffmann, B Billot, DN Greve, JE Iglesias, B Fischl, AV Dalca
+        SynthMorph: learning contrast-invariant registration without acquired images
+        IEEE Transactions on Medical Imaging (TMI), 41 (3), 543-558, 2022
+        https://doi.org/10.1109/TMI.2021.3116879
+    """
+    if not isinstance(mat, torch.Tensor) or mat.dtype != torch.float32:
+        mat = torch.as_tensor(mat, dtype=torch.float32, device=device)
+    
+    # Input shape
+    ndims = mat.shape[-1]
+    if ndims not in (2, 3):
+        raise ValueError(f'Affine matrix must be 2D or 3D, but got ndims of {ndims}.')
+    
+    if mat.shape[-2] != ndims:
+        raise ValueError(f'Invalid matric shape {mat.shape}.')
+
+    # Clip input to inverese trigonometric functions 
+    # as rounding errors move them out of [-1, 1] range.
+    clip = lambda x: torch.clip(x, min=-1, max=1)
+
+    if ndims == 2:
+        y = clip(mat[..., 1, -2])
+        x = clip(mat[..., 0, -2])
+        ang = torch.atan2(y, x).unsqueeze(dim=-1)
+    else:
+        ang2 = torch.asin(clip(mat[..., 0, 2]))
+
+        # Case abs(ang2) == 90 deg. Make angle zero as solution is not unique.
+        ang1_a = torch.zeros_like(ang2)
+        ang3_a = torch.atan2(input=clip(mat[..., 1, 0]), other=clip(mat[..., 1, 1]))
+
+        # Case abs(ang2) != 90 deg
+        # Use safe division, as both cases are computed, even if c2 is zero
+        c2 = torch.cos(ang2)
+        y = divide_no_nan(-mat[..., 1, 2], c2)
+        x = divide_no_nan(mat[..., 2, 2], c2)
+        ang1_b = torch.atan2(clip(y), clip(x))
+        y = divide_no_nan(-mat[..., 0, 1], c2)
+        x = divide_no_nan(mat[..., 0, 0], c2)
+        ang3_b = torch.atan2(clip(y), clip(x))
+
+        # choose between cases.
+        is_case = torch.abs((torch.abs(ang2) - 0.5 * np.pi)) < 1e-6
+        ang1 = torch.where(is_case, ang1_a, ang1_b)
+        ang3 = torch.where(is_case, ang3_a, ang3_b)
+        ang = torch.stack((ang1, ang2, ang3), dim=-1)
+
+    if deg:
+        ang *= 180 / np.pi
+
+    return ang
+
+
+def affine_matrix_to_params(mat, deg=True, device=device):
+    """Derive affine parameters from an N-dimensional transformation matrix.
+
+    The affine transform operates in a right-handed frame of reference, with
+    right-handed intrinsic rotations (see params_to_affine_matrix).
+
+    Arguments:
+        mat: Array-like input matrix to derive affine parameters from, of
+            shape (..., N, N + 1) or (..., N + 1, N + 1), as the last row
+            always is ``(*[0] * N, 1)``. N can be 2 or 3.
+        deg: Return rotation angles in degrees instead of radians.
+
+    Returns:
+        par: Tensor of shape (..., K) holding the affine parameters derived
+            from `mat`, where K is ``N * (N + 1)``. The parameters along the
+            last axis represent, in order: translation, rotation, scaling, and
+            shear. In 3D, for example, the first three indices specify
+            translations along the x, y, and z-axis, and similarly for the
+            remaining indices.
+
+    If you find this function useful, please consider citing:
+        M Hoffmann, B Billot, DN Greve, JE Iglesias, B Fischl, AV Dalca
+        SynthMorph: learning contrast-invariant registration without acquired images
+        IEEE Transactions on Medical Imaging (TMI), 41 (3), 543-558, 2022
+        https://doi.org/10.1109/TMI.2021.3116879
+    """
+    
+    if not isinstance(mat, torch.Tensor) or mat.dtype != torch.float32:
+        mat = torch.as_tensor(mat, dtype=torch.float32, device=device)
+
+    # Input shape
+    ndims = mat.shape[-1] - 1
+    if ndims not in (2, 3):
+        raise ValueError(f'Affine matrix must be 2D or 3D, but got ndims of {ndims}.')
+    
+    if mat.shape[-2] - ndims not in (0, 1):
+        raise ValueError(f'Invalid matrix shape {mat.shape}.')
+
+    # Translation and scaling. Fix negative determinants.
+    shift = mat[..., :ndims, -1]
+    mat = mat[..., :ndims, :ndims]
+    lower = torch.cholesky(mat.t() @ mat)
+    scale = torch.diagonal(lower)
+    scale0 = scale[..., 0] * torch.sign(torch.det(mat))
+    scale = torch.cat((scale0.unsqueeze(dim=-1), scale[..., 1:]), dims=-1)
+
+    # Strip scaling. Shear as upper triangular part
+    strip = torch.diag(scale)
+    upper = lower.t()
+    upper = torch.inverse(strip) @ upper
+    flat_shape = torch.cat((scale0.shape,  [ndims ** 2]), dim=0)
+    upper = torch.reshape(upper, shape=flat_shape)
+    ind = (1,) if ndims == 2 else (1, 2, 5)
+    shear = upper[..., ind]
+
+    # Rotations after stripping scale and shear.
+    # Treat shape as a tensor to support dynamically sized input matrices.
+    zero_shape = torch.cat((scale0.shape, [(ndims - 1) * 3]), dim=0)
+    zero = torch.zeros(size=zero_shape)
+    par = torch.cat((zero, scale, shear), dim=-1)
+    strip = params_to_affine_matrix(par, ndims=ndims)[..., :-1]
+    mat = mat @ torch.inverse(strip)
+    rot = rotation_matrix_to_angles(mat, deg=deg)
+
+
 def draw_affine_params(
     shift=None,
     rot=None,
@@ -1063,9 +1209,6 @@ def fit_affine(x_source, x_target, weights=None):
             ``x_s = tf.linalg.matrix_transpose(x_t)``, and similarly for x_t
             and `x_target`. The last row of `mat` is omitted as it is always
             ``(*[0] * N, 1)``.
-
-    Author:
-        mu40
 
     If you find this function useful, please consider citing:
         M Hoffmann, B Billot, DN Greve, JE Iglesias, B Fischl, AV Dalca
