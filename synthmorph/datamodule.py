@@ -598,35 +598,35 @@ def labels_to_image_new(
     labels = in_lut[labels] # tf.gather(in_lut, indices=labels)
     
 
-    outputs = {'image': image, 'label': labels}
-    if return_vel:
-        outputs['vel'] = vel_field
-    if return_def:
-        outputs['def'] =  def_field
+    # outputs = {'image': image, 'label': labels}
+    # if return_vel:
+    #     outputs['vel'] = vel_field
+    # if return_def:
+    #     outputs['def'] =  def_field
 
-    return outputs
+    # return outputs
 
 
-class SynthMorphDataset(Dataset):
+class SMShapesDataset(Dataset):
     def __init__(
         self,
         size: int,
-        gen_arg: dict,
+        gen_args: dict,
         input_size=(256,256),
-        num_labels: int=26,
+        num_labels: int=16,
         augment=True,
         **kwargs
 
     ):
-        super().__init__(**kwargs)
         self.input_size = input_size
         self.num_labels = num_labels
         self.size = size
         self.label_maps = [self._generate_label() for _ in tqdm(range(size))]
         self.num_dim = len(input_size)
-        self.gen_arg = gen_arg
+        self.gen_args = gen_args
         self.augment = augment
         self.rng = np.random.default_rng()
+        super().__init__(**kwargs)
 
     def _generate_label(self):
         # Fix for number of unique values from generate_map not matcing num_labels
@@ -649,12 +649,12 @@ class SynthMorphDataset(Dataset):
     def __getitem__(self, index: int):
  
         label = self.label_maps[index]
-        if self.augment:
+        if self.augment:    # axis flipping
             axes = self.rng.choice(self.num_dim, size=self.rng.integers(self.num_dim + 1), replace=False, shuffle=False)
             label = torch.flip(label, dims=tuple(axes))
 
-        fixed = labels_to_image(label, **self.gen_arg)
-        moving = labels_to_image(label, **self.gen_arg)
+        fixed = labels_to_image(label, **self.gen_args)
+        moving = labels_to_image(label, **self.gen_args)
         fixed_image, fixed_map = fixed['image'], fixed['label']
         moving_image, moving_map = moving['image'], moving['label']
 
@@ -666,3 +666,57 @@ class SynthMorphDataset(Dataset):
         }
         
         return results
+
+
+class SMSuperpointDataset(Dataset):
+    def __init__(
+        self,
+        size: int,
+        gen_args: dict,
+        input_size=(256,256),
+        max_num_labels: int=16,
+        augment=True,
+        background_args = True,
+        **kwargs
+    ):
+        self.input_size = input_size
+        self.max_num_labels = max_num_labels
+        self.size = size
+        self.label_maps = [self._generate_label() for _ in tqdm(range(size))]
+        self.num_dim = len(input_size)
+        self.gen_args = gen_args
+        self.augment = augment
+        self.background_args = background_args
+        self.rng = np.random.default_rng()
+        super().__init__(**kwargs)
+
+    def _generate_label(self):
+        return
+    
+    def _generate_background(self, mean_min, mean_max):
+        label_map = generate_map(
+            size = self.size,
+            nLabel= self.max_num_labels,
+        )
+
+        gen_args = {
+            'mean_min': mean_min,
+            'mean_max': mean_max,
+        }
+
+        return
+    
+    def _sample_variant(self, variants):
+        return 
+    
+    def __len__(self):
+        return self.size
+    
+    def __getitem__(self, index: int) -> dict:
+        label = self._sample_variant(variant)
+        if self.augment:    # axis flipping
+            axes = self.rng.choice(self.num_dim, size=self.rng.integers(self.num_dim + 1), replace=False, shuffle=False)
+            label = torch.flip(label, dims=tuple(axes))
+
+        
+        return
