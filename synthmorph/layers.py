@@ -267,6 +267,7 @@ class RescaleTransform(nn.Module):
 
         return out
     
+
 class Resize(nn.Module):
     """
     N-D Resize Torch Layer
@@ -391,9 +392,9 @@ class ComposeTransform(nn.Module):
         })
         return config
 
-    def build(self, input_shape, **kwargs):
-        # Sanity check on inputs
-        if not isinstance(input_shape, (list, tuple)):
+    def build(self, input_type, **kwargs):
+        # Sanity check on input
+        if not isinstance(input_type, (list, tuple)):
             raise Exception('ComposeTransform must be called for a list of transforms.')
     
     def forward(self, transforms):
@@ -407,16 +408,17 @@ class ComposeTransform(nn.Module):
             return transforms[0]
         
         # Convert to TF shape
-        transforms_shape_indices = list(range(len(transforms[0].shape)))
+        transforms_shape_indices = list(range(transforms[0].ndim))
         transforms = [trf.permute(0, *transforms_shape_indices[2:], 1) for trf in transforms]
         
-        compose = lambda trf: utils.compose(
-            trf,
+        composed = utils.compose(
+            transforms,
             interp_method=self.interp_method,
             shift_center=self.shift_center
         )
+        composed = composed.permute(0, -1, *transforms_shape_indices[1:-1]) # convert back to Torch format
 
-        return compose(transforms)
+        return composed
     
 
 class ParamsToAffineMatrix(nn.Module):
@@ -467,13 +469,22 @@ class ParamsToAffineMatrix(nn.Module):
                     dimensions. If the size is less than that, the missing parameters will be
                     set to the identity.
         """
-        return utils.params_to_affine_matrix(
+        # Convert to TF shape
+        params_shape_indices = list(range(params.ndim))
+        params = params.permute(0, *params_shape_indices[2:], 1)
+
+        mat = utils.params_to_affine_matrix(
             par=params,
             deg=self.deg,
             shift_scale=self.shift_scale,
             ndims=self.ndims,
             last_row=self.last_row
         )
+        # Convert back to TF format
+        mat_shape_indices = list(range(mat.ndim))
+        mat = mat.permute(0, -1, *mat_shape_indices[1:-1])
+
+        return mat
 
 
 class AffineToDenseShift(nn.Module):
@@ -510,6 +521,61 @@ class AffineToDenseShift(nn.Module):
         Parameters:
             mat: Affine matrices of shape (B, N, N+1).
         """
-        self.build()
-        return utils.affine_to_dense_shift(mat, self.shape, shift_center=self.shift_center)
+        self.build(mat.shape)
 
+        # Convert to TF format
+        mat_shape_indices = list(range(mat.ndim))
+        mat = mat.permute(0, *mat_shape_indices[2:], 1)
+
+        dense = utils.affine_to_dense_shift(mat, self.shape, shift_center=self.shift_center)
+
+        # Convert back to Torch format
+        dense_shape_indices = list(range(dense.ndim))
+        dense = dense.permute(0, -1, *dense_shape_indices[1: -1])
+
+        return dense
+
+
+class CenterOfMass(nn.Module):
+    """
+    Compute the barycenter of extracted features along specified axes
+    """
+    def __init__(self, axes, normalize=True, shift_center=True, dtype=torch.float32, **kwargs):
+        
+        self.axes = axes
+        self.normalize = normalize
+        self.shift_center = shift_center
+        super().__init__(**kwargs)
+
+    def forward(self, feat):
+       
+        # Convert to TF format
+        feat_shape_indices = list(range(feat.ndim))
+        feat = feat.permute(0, *feat_shape_indices[2:], 1)
+
+        center = utils.barycenter(
+            axes=self.axes,
+            normalize=self.normalize,
+            shift_center=self.shift_center
+        )
+        center_shape_indices = list(range(center.ndim))
+        center = center.permute(0, -1, *center_shape_indices[1:, -1])
+
+        return center
+
+class LeastSquaresFit(nn.Module):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+    
+    def forward(self, source, target, weights=None):
+        # Convert to TF format
+        inputs_shape_indices = list(range(source.ndim))
+        source, target = [i.permute(0, *inputs_shape_indices[2:], 1) for i in [source, target]]
+
+        aff = utils.fit_affine(source, target, weights=weights)
+
+        # Convert back to Torch format
+        aff_shape_indices = list(range(aff.ndim))
+        aff = aff.permute(0, -1, *aff_shape_indices[1:, -1])
+
+        return aff
