@@ -58,3 +58,29 @@ class Dice:
         dice = torch.mean(top / bottom)
         return -dice
 
+
+class MSE:
+    """
+    Sigma-weighted mean squared error for image reconstruction.
+    """
+
+    def __init__(self, image_sigma=1.0) -> None:
+        self.image_sigma = image_sigma
+
+    def mse(self, y_true, y_pred):
+        return torch.square(y_true - y_pred)
+    
+    def loss(self, y_true, y_pred, reduce='mean'):
+        # Compute mse
+        mse = self.mse(y_true, y_pred)
+        # Reduce
+        if reduce == 'mean':
+            mse = torch.mean(mse)
+        elif reduce == 'max':
+            mse = torch.max(mse)
+        elif reduce is not None:
+            raise ValueError(f"Unknown MSE reduction type: {reduce}, choose 'mean' or 'max'")
+        
+        return 1.0 / (self.image_sigma ** 2) * mse
+
+
