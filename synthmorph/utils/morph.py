@@ -128,15 +128,15 @@ def prod_n(lst):
     return prod
 
 
-def volshape_to_meshgrid(volshape, **kwargs):
+def volshape_to_meshgrid(volshape, device=device, **kwargs):
     """
-    compute Tensor meshgrid from a volume size
+    Compute Tensor meshgrid from a volume size
 
-    Warning: this uses the tf.meshgrid convention, of 'xy' indexing.
+    Warning: this uses the 'xy' indexing convention
 
     Parameters:
         volshape: the volume size
-        **args: "name" (optional)
+        **kwargs: "name" (optional)
 
     Returns:
         A list of Tensors
@@ -149,7 +149,7 @@ def volshape_to_meshgrid(volshape, **kwargs):
     if not all(isint):
         raise ValueError("volshape needs to be a list of integers")
 
-    linvec = [torch.arange(0, d, device=torch.device('cuda')) for d in volshape]
+    linvec = [torch.arange(0, d, device=device) for d in volshape]
     grid = torch.meshgrid(*linvec, **kwargs)
 
     return grid
@@ -286,32 +286,69 @@ def invert_affine(mat):
     return torch.inverse(make_square_affine(mat))[..., :-1, :]
 
 
-def transform(vol, loc_shift, interp_method='linear', 
-              indexing='ij', fill_value=None):
+def transform(
+    vol, 
+    loc_shift, 
+    interp_method='linear',
+    fill_value=None,
+    shift_center=True,
+    shape=None,
+):
+    """Apply affine or dense transforms to images in N dimensions.
+
+    Essentially interpolates the input ND tensor at locations determined by
+    loc_shift. The latter can be an affine transform or dense field of location
+    shifts in the sense that at location x we now have the data from x + dx, so
+    we moved the data.
+
+    Parameters:
+        vol: tensor or array-like structure  of size vol_shape or
+            (*vol_shape, C), where C is the number of channels.
+        loc_shift: Affine transformation matrix of shape (N, N+1) or a shift
+            volume of shape (*new_vol_shape, D) or (*new_vol_shape, C, D),
+            where C is the number of channels, and D is the dimensionality
+            D = len(vol_shape). If the shape is (*new_vol_shape, D), the same
+            transform applies to all channels of the input tensor.
+        interp_method: 'linear' or 'nearest'.
+        fill_value: Value to use for points sampled outside the domain. If
+            None, the nearest neighbors will be used.
+        shift_center: Shift grid to image center when converting affine
+            transforms to dense transforms. Assumes the input and output spaces are identical.
+        shape: ND output shape used when converting affine transforms to dense
+            transforms. Includes only the N spatial dimensions. If None, the
+            shape of the input image will be used. Incompatible with `shift_center=True`.
+
+    Returns:
+        Tensor whose voxel values are the values of the input tensor
+        interpolated at the locations defined by the transform.
+
+    Notes:
+        There used to be an argument for choosing between matrix ('ij') and Cartesian ('xy')
+        indexing. Due to inconsistencies in how some functions and layers handled xy-indexing, we
+        removed it in favor of default ij-indexing to minimize the potential for confusion.
+
+    Keywords:
+        interpolation, sampler, resampler, linear, bilinear
     """
-    transform (interpolation N-D volumes (features) given shifts at each location in Torch
+    if shape is not None and shift_center:
+        raise ValueError('`shape` option incompatible with `shift_center=True`')
+    
+    # Convert data type 
+    ftype = torch.float32
+    if not torch.is_tensor(vol) or not vol.is_floating_point():
+        vol = torch.as_tensor(vol, dtype=ftype)
+    if not torch.is_tensor(loc_shift) or not loc_shift.is_floating_point():
+        loc_shift = torch.as_tensor(loc_shift, dtype=ftype)
 
-    Essentially interpolates volume vol at locations determined by loc_shift. 
-    This is a spatial transform in the sense that at location [x] we now have the data from, 
-    [x + shift] so we've moved data.
+    # Convert affine to location shift
+    if is_affine_shape(loc_shift.shape):
+        loc_shift = affine_to_dense_shift(
+            loc_shift,
+            shape=vol.shape[:-1] if shape is None else shape,
+            shift_center=shift_center,
+        )
 
-    Args:
-        vol (Tensor): volume with size vol_shape or [*vol_shape, C]
-        where C is the number of channels
-        loc_shift: shift volume [*new_vol_shape, D] or [*new_vol_shape, C, D]
-        where C is the number of channels, and D is the dimentionality len(vol_shape)
-        If loc_shift is [*new_vol_shape, D], it applies to all channels of vol
-        interp_method (default:'linear'): 'linear', 'nearest'
-        indexing (default: 'ij'): 'ij' (matrix) or 'xy' (cartesian).
-        In general, prefer to leave this 'ij'
-        fill_value (default: None): value to use for points outside the domain.
-        If None, the nearest neighbors will be used.
-
-    Return:
-        new interpolated volumes in the same size as loc_shift[0]
-    """
-    # Parse shapes.
-    # location volshape, including channels if available
+    # Parse spatial location shape, including channels if available
     vol = torch.squeeze(vol, 0)
     loc_shift = torch.squeeze(loc_shift, 0)
     loc_volshape = loc_shift.shape[:-1]
@@ -323,10 +360,15 @@ def transform(vol, loc_shift, interp_method='linear',
     nb_dims = len(vol.shape) - 1
     is_channelwise = len(loc_volshape) == (nb_dims + 1)
     assert loc_shift.shape[-1] == nb_dims, \
-        f'Dimension check failed for transform(): {nb_dims}D volume (shape {vol.shape[:-1]}) called with {loc_shift.shape[-1]}D transform'
+        f'Dimension check failed for transform(): {nb_dims}D volume (shape {vol.shape[:-1]}) ' \
+        f'called with {loc_shift.shape[-1]}D transform'
 
     # Location should be mesh and delta
-    mesh = volshape_to_meshgrid(loc_volshape, indexing=indexing) # Volume mesh
+    mesh = volshape_to_meshgrid(loc_volshape, indexing='ij')    # volume mesh
+    mesh = list(mesh)
+    for d, m in enumerate(mesh):
+        if m.dtype != loc_shift.dtype:
+            mesh[d] = torch.as_tensor(m, dtype=loc_shift.dtype)
     loc = [mesh[d] + loc_shift[..., d] for d in range(nb_dims)]
 
     # If channelwise location, then append the channel as part of the location lookup

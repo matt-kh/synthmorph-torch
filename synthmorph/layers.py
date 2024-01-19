@@ -30,52 +30,64 @@ class SpatialTransformer(nn.Module):
     def __init__(
        self,
        interp_method='linear',
-       indexing='ij',
        single_transform=False,
        fill_value=None,
        shift_center=True,
-       **kwargs,
+       shape=None,
+       **kwargs
     ):
+        """
+        Parameters:
+            interp_method: Interpolation method. Must be 'linear' or 'nearest'.
+            single_transform: Use single transform for the entire image batch.
+            fill_value: Value to use for points sampled outside the domain.
+                If None, the nearest neighbors will be used.
+            shift_center: Shift grid to image center when converting affine
+                transforms to dense transforms. Assumes the input and output spaces are identical.
+            shape: ND output shape used when converting affine transforms to dense
+                transforms. Includes only the N spatial dimensions. If None, the
+                shape of the input image will be used. Incompatible with `shift_center=True`.
+
+        Notes:
+            There used to be an argument for choosing between matrix ('ij') and Cartesian ('xy')
+            indexing. Due to inconsistencies in how some functions and layers handled xy-indexing,
+            we removed it in favor of default ij-indexing to minimize the potential for confusion.
+
+        """
         self.interp_method = interp_method
-        assert indexing in ['ij', 'xy'], "indexing has to be 'ij' (matrix) or 'xy' (cartesian)"
-        self.indexing = indexing
         self.single_transform = single_transform
         self.fill_value = fill_value
         self.shift_center = shift_center
+        self.shape = shape
         self.built = False
         super().__init__(**kwargs)  
         
 
     def build(self, input_shape):
-        # Only build once to avoid repetition
+        # Only build once
         if self.built:
             return  
     
-        # sanity check on input list
+        # Sanity check on input list
         if len(input_shape) > 2:
             raise ValueError('Spatial Transformer must be called on a list of length 2: '
                              'first argument is the image, second is the transform.')
 
-        # set up number of dimensions
+        # Set up number of dimensions
         self.ndims = len(input_shape[0]) - 2
         self.imshape = input_shape[0][1:]
         self.trfshape = input_shape[1][1:]
         self.is_affine = utils.is_affine_shape(input_shape[1][1:])
 
-        # make sure inputs are reasonable shapes
-        if self.is_affine:
-            expected = (self.ndims, self.ndims + 1)
-            actual = tuple(self.trfshape[-2:])
-            if expected != actual:
-                raise ValueError(f'Expected {expected} affine matrix, got {actual}.')
-        else:
+        # Make sure transform has reasonable shape (is_affine_shape throws error otherwise)
+        if not self.is_affine:
             image_shape = tuple(self.imshape[:-1])
             dense_shape = tuple(self.trfshape[:-1])
             if image_shape != dense_shape:
                 warnings.warn(f'Dense transform shape {dense_shape} does not match '
                               f'image shape {image_shape}.')
 
-        # confirm built
+        # Confirm built
         self.built = True
 
 
@@ -94,23 +106,8 @@ class SpatialTransformer(nn.Module):
         # # necessary for multi-gpu models
         vol = torch.reshape(inputs[0], (-1, *self.imshape))
         trf = torch.reshape(inputs[1], (-1, *self.trfshape))
-        
-        
-        # convert affine matrix to warp field
-        if self.is_affine:
-            fun = lambda x: utils.affine_to_dense_shift(x, vol.shape[1: -1],
-                                                shift_center=self.shift_center,
-                                                indexing=self.indexing)
-            trf = torch.stack([fun(t) for t in torch.unbind(trf)])
-    
-        # prepare location shift
-        if self.indexing == 'xy':  # shift the first two dimensions
-            trf_split = torch.split(trf, trf.shape[-1], dim=-1)
-            trf_lst = [trf_split[1], trf_split[0], *trf_split[2:]]
-            trf = torch.cat(trf_lst, dim=-1)
 
         # map transform across batch
-        out = None
         if self.single_transform:
             out = torch.stack([self._single_transform([v, trf[0, :]]) for v in torch.unbind(vol)])
         else:
@@ -120,8 +117,14 @@ class SpatialTransformer(nn.Module):
         
 
     def _single_transform(self, inputs):    
-        return utils.transform(inputs[0], inputs[1], interp_method=self.interp_method,
-                               fill_value=self.fill_value)
+        return utils.transform(
+            inputs[0], 
+            inputs[1], 
+            interp_method=self.interp_method,
+            fill_value=self.fill_value,
+            shift_center=self.shift_center,
+            shape=self.shape,
+        )
 
 
 class VecInt(nn.Module):
