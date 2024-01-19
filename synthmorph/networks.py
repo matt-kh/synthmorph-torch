@@ -226,7 +226,7 @@ class UnetAffine(nn.Module):
                  inshape=None,
                  infeats=None,
                  nb_features=None,
-                 rem_features = None,
+                 add_features = None,
                  nb_levels=None,
                  max_pool=2,    
                  feat_mult=1,
@@ -278,19 +278,20 @@ class UnetAffine(nn.Module):
 
         # extract any surplus (full resolution) decoder convolutions
         enc_nf, dec_nf = nb_features
-        nb_dec_convs = len(enc_nf)
-        if len(dec_nf) < nb_dec_convs:
-            nb_dec_convs = len(dec_nf)
-            final_convs = dec_nf + rem_features
+        nb_enc_convs = len(enc_nf)
+        nb_dec_convs = len(dec_nf)
+        if nb_dec_convs < nb_enc_convs:
+            final_convs = dec_nf + add_features
             dec_nf = []
         else:
             final_convs = dec_nf[nb_dec_convs:]
             dec_nf = dec_nf[:nb_dec_convs]
 
-        self.nb_levels = int(nb_dec_convs / nb_conv_per_level) + 1
+        self.nb_enc_levels = int(nb_enc_convs / nb_conv_per_level) + 1
+        self.nb_dec_levels = int(nb_dec_convs / nb_conv_per_level) + 1
 
         if isinstance(max_pool, int):
-            max_pool = [max_pool] * self.nb_levels
+            max_pool = [max_pool] * self.nb_enc_levels
 
         # cache downsampling / upsampling operations
         MaxPooling = getattr(nn, 'MaxPool%dd' % ndims)
@@ -301,7 +302,7 @@ class UnetAffine(nn.Module):
         prev_nf = infeats
         encoder_nfs = [prev_nf]
         self.encoder = nn.ModuleList()
-        for level in range(self.nb_levels - 1):
+        for level in range(self.nb_enc_levels - 1):
             convs = nn.ModuleList()
             for conv in range(nb_conv_per_level):
                 nf = enc_nf[level * nb_conv_per_level + conv]
@@ -313,7 +314,7 @@ class UnetAffine(nn.Module):
         # configure decoder (up-sampling path)
         encoder_nfs = np.flip(encoder_nfs)
         self.decoder = nn.ModuleList()
-        for level in range(self.nb_levels - 1):
+        for level in range(self.nb_dec_levels - 1):
             convs = nn.ModuleList()
             for conv in range(nb_conv_per_level):
                 nf = dec_nf[level * nb_conv_per_level + conv]
@@ -321,7 +322,7 @@ class UnetAffine(nn.Module):
                 convs.append(ConvDropBlock(ndims, prev_nf, nf))
                 prev_nf = nf
             self.decoder.append(convs)
-            if not half_res or level < (self.nb_levels - 2):
+            if not half_res or level < (self.nb_dec_levels - 2):
                 prev_nf += encoder_nfs[level]
 
         # now we take care of any remaining convolutions
@@ -346,7 +347,7 @@ class UnetAffine(nn.Module):
         for level, convs in enumerate(self.decoder):
             for conv in convs:
                 x = conv(x)
-            if not self.half_res or level < (self.nb_levels - 2):
+            if not self.half_res or level < (self.nb_dec_levels - 2):
                 x = self.upsampling[level](x)
                 x = torch.cat([x, x_history.pop()], dim=1)
 
@@ -468,7 +469,7 @@ class VxmDense(nn.Module):
     
         # transform into flow field
         flow_field = self.flow(x)
-        
+
         # resize flow for integration
         pos_flow = flow_field
 
@@ -518,12 +519,15 @@ class VxmAffineFeatureDetector(nn.Module):
         in_shape=None,
         input_model=None,
         num_chan=1,
+         dropout=0,
         num_feat=64,
         enc_nf=[256] * 4,
         dec_nf=[256] * 0,
         add_nf=[256] * 4,
         per_level=1,
-        dropout=0,
+        unet_half_res=True,
+        src_feats=1,
+        trg_feats=1,
         half_res=True,
         weighted=True,
         rigid=False,
@@ -579,7 +583,7 @@ class VxmAffineFeatureDetector(nn.Module):
         super().__init__()
 
         # Dimensions
-        shape_full = in_shape
+        shape_full = np.asarray(in_shape)
         shape_half = shape_full // 2
         ndims = len(shape_full)
         assert ndims in (2, 3), 'only 2D and 3D supported'
@@ -587,80 +591,86 @@ class VxmAffineFeatureDetector(nn.Module):
         
         # Layers
         conv = getattr(nn, f'Conv{ndims}d')
-        maxpool = getattr(nn, f'Maxpool{ndims}d')
+        maxpool = getattr(nn, f'MaxPool{ndims}d')
         
         dtype = torch.get_default_dtype()
 
         self.halfres_st = layers.SpatialTransformer(fill_value=0, shape=shape_half, shift_center=False)
+        self.det = UnetAffine(
+            inshape=shape_full,
+            infeats=(src_feats + trg_feats),
+            nb_features=[enc_nf, dec_nf],
+            add_features=add_nf,
+            nb_conv_per_level=per_level,
+            half_res=unet_half_res,
+        )
 
-        # Downsampling and upsampling operations
-        maxpool_scale = [2] * len(enc_nf)
-        self.pooling = [maxpool(kernel_size=ms, dtype=torch.float32) for ms in maxpool_scale]
-        self.upsampling = [nn.Upsample(scale_factor=ms, mode='nearest') for ms in maxpool_scale]
+        # # Downsampling and upsampling operations
+        # maxpool_scale = [2] * len(enc_nf)
+        # self.pooling = [maxpool(kernel_size=ms, dtype=torch.float32) for ms in maxpool_scale]
+        # self.upsampling = [nn.Upsample(scale_factor=ms, mode='nearest') for ms in maxpool_scale]
 
-        # Feature detector: encoder.
-        prev_nf = num_chan
-        self.encoder = nn.ModuleList()
-        for nf in enc_nf:
-            blocks = nn.ModuleList()
-            for _ in range(per_level):
-                blocks.append(
-                    ConvDropBlock(
-                        ndims=ndims, 
-                        in_channels=prev_nf, 
-                        out_channels=nf, 
-                        dropout=dropout
-                    )
-                )
-                prev_nf = nf
-            self.encoder.append(blocks)
+        # # Feature detector: encoder.
+        # prev_nf = num_chan
+        # self.encoder = nn.ModuleList()
+        # for nf in enc_nf:
+        #     blocks = nn.ModuleList()
+        #     for _ in range(per_level):
+        #         blocks.append(
+        #             ConvDropBlock(
+        #                 ndims=ndims, 
+        #                 in_channels=prev_nf, 
+        #                 out_channels=nf, 
+        #                 dropout=dropout
+        #             )
+        #         )
+        #         prev_nf = nf
+        #     self.encoder.append(blocks)
 
-        # Feature detector: decoder
-        self.decoder = nn.ModuleList()
-        for nf in dec_nf:
-            blocks = nn.ModuleList()
-            for _ in range(per_level):
-                blocks.append(
-                    ConvDropBlock(
-                        ndims=ndims, 
-                        in_channels=prev_nf, 
-                        out_channels=nf, 
-                        dropout=dropout
-                    )
-                )
-                prev_nf = nf
-            self.decoder.append(blocks)
+        # # Feature detector: decoder
+        # self.decoder = nn.ModuleList()
+        # for nf in dec_nf:
+        #     blocks = nn.ModuleList()
+        #     for _ in range(per_level):
+        #         blocks.append(
+        #             ConvDropBlock(
+        #                 ndims=ndims, 
+        #                 in_channels=prev_nf, 
+        #                 out_channels=nf, 
+        #                 dropout=dropout
+        #             )
+        #         )
+        #         prev_nf = nf
+        #     self.decoder.append(blocks)
         
-        # Additional convolutions
-        self.remaining = nn.ModuleList()
-        for nf in add_nf:
-            self.remaining.append(
-                ConvDropBlock(
-                    ndims=ndims, 
-                    in_channels=prev_nf, 
-                    out_channels=nf, 
-                    dropout=dropout
-                )
-            )
-            prev_nf = nf
+        # # Additional convolutions
+        # self.remaining = nn.ModuleList()
+        # for nf in add_nf:
+        #     self.remaining.append(
+        #         ConvDropBlock(
+        #             ndims=ndims, 
+        #             in_channels=prev_nf, 
+        #             out_channels=nf, 
+        #             dropout=dropout
+        #         )
+        #     )
+        #     prev_nf = nf
         
-        self.det = nn.ModuleList(self.encoder + self.decoder + self.remaining)
+        # self.det = nn.ModuleList(self.encoder + self.decoder + self.remaining)
 
 
         # Output features
-        out_args = dict(kernel_size=3, padding='same')
         self.out = nn.ModuleList()
-        self.out.append(conv(prev_nf, num_feat, **out_args))
+        self.out.append(conv(self.det.final_nf, num_feat, kernel_size=3, padding='same'))
         self.out.append(nn.ReLU())
 
-        com_args = dict(axes=range(1, ndims + 1), normalize=True, shift_center=True, dtype=dtype)
-        self.com = layers.CenterOfMass(**com_args)
+        self.com = layers.CenterOfMass(axes=range(1, ndims + 1), normalize=True, shift_center=True, dtype=dtype)
         self.ls_fit = layers.LeastSquaresFit()
         self.params_to_aff = layers.ParamsToAffineMatrix(ndims=ndims)
         self.compose = layers.ComposeTransform(shift_center=False)
-        self.aff_to_dense = layers.AffineToDenseShift(shift_center=False)
         
         shape_out = shape_half if return_trans_to_half_res else shape_full
+        self.aff_to_dense = layers.AffineToDenseShift(shape_out, shift_center=False)
         self.out_st = layers.SpatialTransformer(shift_center=False, fill_value=0, shape=shape_out)
         
 
@@ -673,7 +683,7 @@ class VxmAffineFeatureDetector(nn.Module):
         """
         x = torch.cat([source, target], dim=1)
         x = self.det(x)
-        
+        x = self.out(x)
 
         return
     
