@@ -59,14 +59,10 @@ class SpatialTransformer(nn.Module):
         self.fill_value = fill_value
         self.shift_center = shift_center
         self.shape = shape
-        self.built = False
         super().__init__(**kwargs)  
         
 
     def build(self, input_shape):
-        # Only build once
-        if self.built:
-            return  
     
         # Sanity check on input list
         if len(input_shape) > 2:
@@ -87,9 +83,6 @@ class SpatialTransformer(nn.Module):
                 warnings.warn(f'Dense transform shape {dense_shape} does not match '
                               f'image shape {image_shape}.')
 
-        # Confirm built
-        self.built = True
-
 
     def forward(self, inputs):
         """
@@ -98,8 +91,6 @@ class SpatialTransformer(nn.Module):
             is either a dense warp of shape [B, D1, ..., DN, N] or an affine matrix
             of shape [B, N, N+1].
         """
-
-        inputs = [i.permute(0, 2, 3, 1) for i in inputs]    # convert to tf format
         input_shape = [i.shape for i in inputs]
         self.build(input_shape)
         
@@ -113,8 +104,8 @@ class SpatialTransformer(nn.Module):
         else:
             out = torch.stack([self._single_transform([v, t]) for v, t in zip(torch.unbind(vol), torch.unbind(trf))])
         
-        return out.permute(0, 3, 1, 2)  # convert back to torch format
-        
+        return out
+
 
     def _single_transform(self, inputs):    
         return utils.transform(
@@ -180,7 +171,6 @@ class VecInt(nn.Module):
     
     def forward(self, inputs):
         inputs = [torch.unsqueeze(i, 0) for i in inputs]
-        inputs = [i.permute(0, 2, 3, 1) for i in inputs]    # convert to tf format
         input_shape = [i.shape for i in inputs]
         self.build(input_shape)
 
@@ -208,7 +198,6 @@ class VecInt(nn.Module):
         out_tensors = [loc_shift] + inputs[1:]
         # out = torch.stack([self._single_int(torch.unsqueeze(t, 0)) for t in out_tensors])
         out = torch.stack([self._single_int(t) for t in out_tensors])
-        out = out.permute(0, 3, 1, 2)   # convert back to torch format
   
         # if hasattr(inputs[0], 'shape'):
         #     out.shape = inputs[0].shape
@@ -251,7 +240,6 @@ class RescaleTransform(nn.Module):
         self.built = True
 
     def forward(self, transform):
-        transform = transform.permute(0, 2, 3, 1)   # convert to tf format
         input_shape = transform.shape
         self.build(input_shape)
 
@@ -265,8 +253,6 @@ class RescaleTransform(nn.Module):
         # If unbatched, add batch axis
         if len(out.shape) < 4:
             out = out.unsqueeze(0)
-
-        out = out.permute(0, 3, 1, 2)   # convert back to torch format
 
         return out
     
@@ -333,7 +319,6 @@ class Resize(nn.Module):
             inputs: volume of list with one volume
         """
         inputs = [torch.unsqueeze(i, 0) for i in inputs]
-        inputs = [i.permute(0, 2, 3, 1) for i in inputs]    # convert to tf format
         input_shape = [i.shape for i in inputs]
         self.build(input_shape)
         
@@ -350,7 +335,6 @@ class Resize(nn.Module):
         # map transform across batch
         out = torch.stack([self._single_resize(t) for t in vol])
         indices = list(range(len(out.shape)))
-        out = out.permute(0, -1, *indices[1:-1])
         return out
 
     def _single_resize(self, inputs):
@@ -382,7 +366,7 @@ class ComposeTransform(nn.Module):
     T = ComposeTransform()([A, B, C])
     """
 
-    def __init__(self, interp_method='linear', shift_center=True, **kwargs) -> None:
+    def __init__(self, interp_method='linear', shift_center=True, shape=None, **kwargs) -> None:
         self.interp_method = interp_method
         self.shift_center = shift_center
         super().__init__(**kwargs)
@@ -409,20 +393,22 @@ class ComposeTransform(nn.Module):
 
         if len(transforms) == 1:
             return transforms[0]
-        
-        # Convert to TF shape
-        transforms_shape_indices = list(range(transforms[0].ndim))
-        transforms = [trf.permute(0, *transforms_shape_indices[2:], 1) for trf in transforms]
-        
-        composed = utils.compose(
-            transforms,
+
+        composed = []
+        batch_size = transforms[0].shape[0]
+        for b in range(batch_size):
+            batch = [t[b, ...] for t in transforms]
+            composed.append(self._compose(batch))
+
+        return torch.stack(composed)
+    
+    def _compose(self, inputs):
+        return utils.compose(
+            inputs,
             interp_method=self.interp_method,
             shift_center=self.shift_center
         )
-        composed = composed.permute(0, -1, *transforms_shape_indices[1:-1]) # convert back to Torch format
-
-        return composed
-    
+        
 
 class ParamsToAffineMatrix(nn.Module):
     """
@@ -472,9 +458,6 @@ class ParamsToAffineMatrix(nn.Module):
                     dimensions. If the size is less than that, the missing parameters will be
                     set to the identity.
         """
-        # Convert to TF shape
-        params_shape_indices = list(range(params.ndim))
-        params = params.permute(0, *params_shape_indices[2:], 1)
 
         mat = utils.params_to_affine_matrix(
             par=params,
@@ -483,9 +466,6 @@ class ParamsToAffineMatrix(nn.Module):
             ndims=self.ndims,
             last_row=self.last_row
         )
-        # Convert back to TF format
-        mat_shape_indices = list(range(mat.ndim))
-        mat = mat.permute(0, -1, *mat_shape_indices[1:-1])
 
         return mat
 
@@ -526,15 +506,7 @@ class AffineToDenseShift(nn.Module):
         """
         self.build(mat.shape)
 
-        # Convert to TF format
-        mat_shape_indices = list(range(mat.ndim))
-        mat = mat.permute(0, *mat_shape_indices[2:], 1)
-
         dense = utils.affine_to_dense_shift(mat, self.shape, shift_center=self.shift_center)
-
-        # Convert back to Torch format
-        dense_shape_indices = list(range(dense.ndim))
-        dense = dense.permute(0, -1, *dense_shape_indices[1: -1])
 
         return dense
 
@@ -548,21 +520,18 @@ class CenterOfMass(nn.Module):
         self.axes = axes
         self.normalize = normalize
         self.shift_center = shift_center
+        self.dtype = dtype
         super().__init__(**kwargs)
 
     def forward(self, feat):
-       
-        # Convert to TF format
-        feat_shape_indices = list(range(feat.ndim))
-        feat = feat.permute(0, *feat_shape_indices[2:], 1)
 
         center = utils.barycenter(
+            feat,
             axes=self.axes,
             normalize=self.normalize,
-            shift_center=self.shift_center
+            shift_center=self.shift_center,
+            dtype=self.dtype
         )
-        center_shape_indices = list(range(center.ndim))
-        center = center.permute(0, -1, *center_shape_indices[1:, -1])
 
         return center
 
@@ -570,15 +539,8 @@ class LeastSquaresFit(nn.Module):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
     
-    def forward(self, source, target, weights=None):
-        # Convert to TF format
-        inputs_shape_indices = list(range(source.ndim))
-        source, target = [i.permute(0, *inputs_shape_indices[2:], 1) for i in [source, target]]
-
+    def forward(self, source, target, weights):
+            
         aff = utils.fit_affine(source, target, weights=weights)
-
-        # Convert back to Torch format
-        aff_shape_indices = list(range(aff.ndim))
-        aff = aff.permute(0, -1, *aff_shape_indices[1:, -1])
 
         return aff

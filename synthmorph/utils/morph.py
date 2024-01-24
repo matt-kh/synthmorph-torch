@@ -173,30 +173,32 @@ def ndgrid(*args, **kwargs):
 
 def affine_to_dense_shift(matrix, shape, 
                           shift_center=True, 
-                          indexing='ij'):
+                          warp_right=None):
     """
-    Transforms an affine matrix to a dense location shift.
+    Convert N-dimensional (ND) matrix transforms to dense displacement fields.
 
     Algorithm:
         1. Build and (optionally) shift grid to center of image.
-        2. Apply affine matrix to each index.
+        2. Apply matrices to each index coordinate.
         3. Subtract grid.
 
     Parameters:
-        matrix: affine matrix of shape (N, N+1).
-        shape: ND shape of the target warp.
+        matrix: Affine matrix of shape (..., M, N + 1), where M is N or N + 1. Can have any batch
+            dimensions.
+        shape: ND shape of the output space.
         shift_center: Shift grid to image center.
-        indexing: Must be 'xy' or 'ij'.
+        warp_right: Right-compose the matrix transform with a displacement field of shape
+            (..., *shape, N), with batch dimensions broadcastable to those of `matrix`.
 
     Returns:
-        Dense shift (warp) of shape (*shape, N).
+        Dense shift (warp) of shape (..., *shape, N).
     """
 
     if isinstance(shape, torch.Size):
         shape = list(shape)
 
     if not torch.is_tensor(matrix) or not matrix.is_floating_point():
-        matrix = matrix.float()
+        matrix = torch.as_tensor(matrix, torch.float32)
 
     # check input shapes
     ndims = len(shape)
@@ -204,31 +206,34 @@ def affine_to_dense_shift(matrix, shape,
         matdim = matrix.shape[-1] - 1
         raise ValueError(f'Affine ({matdim}D) does not match target shape ({ndims}D).')
 
-    # list of volume ndgrid
-    # N-long list, each entry of shape
-    mesh = volshape_to_meshgrid(shape, indexing=indexing)
-    mesh = [f if f.dtype == matrix.dtype else f.to(matrix.dtype) for f in mesh]
-
+    # Coordinate grid
+    mesh = (torch.arange(s, dtype=matrix.dtype) for s in shape)
     if shift_center:
-        mesh = [(f - (shape[i] - 1) / 2) for i, f in enumerate(mesh)]
+        mesh = (m - 0.5 * (s - 1) for m, s in zip(mesh, shape))
+    mesh = [torch.reshape(m, shape=(-1,)) for m in ndgrid(*mesh)]
+    mesh = torch.stack(mesh)
+    out = mesh
 
-    # add an all-ones entry and transform into a large matrix
-    flat_mesh = [f.reshape(-1) for f in mesh]
-    flat_mesh.append(torch.ones_like(flat_mesh[0], dtype=matrix.dtype))
-    mesh_matrix = torch.stack(flat_mesh, dim=1).transpose(0, 1)  # 4 x nb_voxels
+    # Optionally right-compose with warp field
+    if warp_right is not None:
+        if not torch.is_tensor(warp_right) or warp_right.dtype != matrix.dtype:
+            warp_right = torch.as_tensor(warp_right, dtype=matrix.dtype)
+        flat_shape = torch.cat((torch.as_tensor(warp_right.shape[:-1 - ndims]), (-1, ndims)), axis=0)
+        warp_right = torch.reshape(warp_right, flat_shape)  # ... x nb_voxels x N
+        out += torch.transpose(warp_right, -1, -2)    # ... x N x nb_voxels
 
-    # compute locations
-    loc_matrix = torch.matmul(matrix, mesh_matrix)  # N+1 x nb_voxels
-    loc_matrix = loc_matrix[:ndims, :].transpose(0, 1)  # nb_voxels x N
-    loc = loc_matrix.reshape(shape + [ndims])  # *shape x N
-
-    # get shifts and return
-    return loc - torch.stack(mesh, dim=ndims)
+    # Compute locations, subtract grid to obtain shift
+    out = matrix[..., :ndims, :-1] @ out + matrix[..., :ndims, -1:]     # ... x N x nb_voxels
+    out = torch.transpose(out - mesh, -1, -2)
+  
+    # Restore shape
+    shape = np.concatenate((tuple(matrix.shape[:-2]), (*shape, ndims)), axis=0)
+    return torch.reshape(out, tuple(shape.astype(np.int32)))    # ... x in_shape x N
 
 
 def is_affine_shape(shape):
     """
-    Determins whether the given shape (single-batch) represents an
+    Determines whether the given shape (single-batch) represents an
     affine matrix.
 
     Parameters:
@@ -262,16 +267,18 @@ def make_square_affine(mat):
         mat: Affine matrix of shape [..., N, N+1].
     """
     validate_affine_shape(mat.shape)
+    if mat.shape[-2] == mat.shape[-1]:
+        return mat
 
     # Support dynamic shapes by storing in tensors
-    shape_input = mat.shape
-    shape_batch = shape_input[:2]
-    shape_zeros = torch.cat((shape_batch, (1,), shape_input[-2:-1]), dim=0)
-    shape_one = torch.cat((shape_batch, (1, 1)), dim=0)
+    shape_input = tuple(mat.shape)
+    shape_batch = shape_input[:-2]
+    shape_zeros = np.concatenate((shape_batch, (1,), shape_input[-2:-1]), axis=0).astype(np.int32)
+    shape_one = np.concatenate((shape_batch, (1, 1)), axis=0).astype(np.int32)
 
     # Append last row
-    zeros = torch.zeros(size=shape_zeros, dtype=mat.dtype)
-    one = torch.ones(size=shape_one, dtype=mat.dtype)
+    zeros = torch.zeros(size=tuple(shape_zeros), dtype=mat.dtype)
+    one = torch.ones(size=tuple(shape_one), dtype=mat.dtype)
     row = torch.cat((zeros, one), dim=-1)
     return torch.cat((mat, row), dim=-2)
 
@@ -283,7 +290,8 @@ def invert_affine(mat):
     Parameters:
         mat: Affine matrix of shape [..., N, N+1].
     """
-    return torch.inverse(make_square_affine(mat))[..., :-1, :]
+    rows = mat.shape[-2]
+    return torch.inverse(make_square_affine(mat))[..., :rows, :]
 
 
 def transform(
@@ -349,8 +357,8 @@ def transform(
         )
 
     # Parse spatial location shape, including channels if available
-    vol = torch.squeeze(vol, 0)
-    loc_shift = torch.squeeze(loc_shift, 0)
+    # vol = torch.squeeze(vol, 0)
+    # loc_shift = torch.squeeze(loc_shift, 0)
     loc_volshape = loc_shift.shape[:-1]
 
     if isinstance(loc_volshape, torch.Size):
@@ -379,7 +387,7 @@ def transform(
     return interpn(vol, loc, interp_method=interp_method, fill_value=fill_value)
 
 
-def compose(transforms, interp_method='linear', shift_center=True):
+def compose(transforms, interp_method='linear', shift_center=True, shape=None):
     """
     Compose a single transform from a series of transforms.
 
@@ -408,18 +416,13 @@ def compose(transforms, interp_method='linear', shift_center=True):
     if len(transforms) < 2:
         raise ValueError("Compose transform must include 2 or more transforms")
     
-    def ensure_square_affine(matrix):
-        if matrix.shape[-1] != matrix.shape[-2]:
-           return make_square_affine(matrix)
-        return matrix
-    
     curr = transforms[-1]
     for tr in reversed(transforms[:-1]):
-                # Dense warp on left: interpolate.
+        # Dense warp on left: interpolate.
         if not is_affine_shape(tr.shape):
             if is_affine_shape(curr.shape):
-                curr = affine_to_dense_shift(curr, shape=next.shape[:-1], shift_center=shift_center)
-            curr = curr + transform(vol=tr, loc_shift=curr, interp_method=interp_method)
+                curr = affine_to_dense_shift(curr, shape=tr.shape[:-1], shift_center=shift_center)
+            curr += transform(vol=tr, loc_shift=curr, interp_method=interp_method)
         
         # Matrix on left, dense warp on right: matrix-vector product.
         elif not is_affine_shape(curr.shape):
@@ -430,9 +433,9 @@ def compose(transforms, interp_method='linear', shift_center=True):
             
          # No dense warp: matrix product.
         else:
-            next = ensure_square_affine(next)
-            curr = ensure_square_affine(curr)
-            curr = torch.matmul(next, curr)[:-1]
+            tr = make_square_affine(tr)
+            curr = make_square_affine(curr)
+            curr = torch.matmul(tr, curr)[:-1]
 
     return curr
 
@@ -731,7 +734,7 @@ def separable_conv(x,
     return x if batched else x[0, ...]
 
 
-def barycenter(x, axes=None, normalize=False, shift_center=False, dtype=torch.float32):
+def barycenter(x: torch.Tensor, axes=None, normalize=False, shift_center=False, dtype=torch.float32):
     """
     Compute barycenter along specified axes.
 
@@ -781,11 +784,11 @@ def barycenter(x, axes=None, normalize=False, shift_center=False, dtype=torch.fl
     grid = torch.stack(grid, axis=-1)
 
     # Reduction
-    axes_red = axes_all[-num_dim:]
-    x = x.expand(axis=-1)
+    axes_red = tuple(axes_all[-num_dim:])
+    x = x.unsqueeze(axis=-1)
     x = divide_no_nan(
         torch.sum(grid * x, dim=axes_red),
-        torch.mean(x, dim=axes_red)
+        torch.sum(x, dim=axes_red)
     )
 
     return x.to(dtype=dtype) if dtype != compute_dtype else x
@@ -1139,7 +1142,7 @@ def affine_matrix_to_params(mat, deg=True, device=device):
     mat = mat @ torch.inverse(strip)
     rot = rotation_matrix_to_angles(mat, deg=deg)
 
-
+# WIP
 def draw_affine_params(
     shift=None,
     rot=None,
@@ -1232,7 +1235,7 @@ def draw_affine_params(
             prop.update(minval=-lim, maxval=lim)
 
 
-def fit_affine(x_source, x_target, weights=None):
+def fit_affine(x_source: torch.Tensor, x_target: torch.Tensor, weights: torch.Tensor=None):
     """Fit an affine transform between two sets of corresponding points.
 
     Fit an N-dimensional affine transform between two sets of M corresponding
@@ -1258,10 +1261,10 @@ def fit_affine(x_source, x_target, weights=None):
         IEEE Transactions on Medical Imaging (TMI), 41 (3), 543-558, 2022
         https://doi.org/10.1109/TMI.2021.3116879
     """
-    shape = torch.cat((x_target.shape[:-1], [1]), dim=0)
-    ones = torch.ones(size=shape, dtype=x_target.dtype)
+    shape = np.concatenate((x_target.shape[:-1], [1]), axis=0)
+    ones = torch.ones(size=tuple(shape), dtype=x_target.dtype)
     x = torch.cat((x_target, ones), dim=-1)
-    x_transp = torch.transpose(x, 0, 1)
+    x_transp = torch.transpose(x, -1, -2)
     y = x_source
 
     if weights is not None:
@@ -1270,7 +1273,7 @@ def fit_affine(x_source, x_target, weights=None):
         x_transp *= torch.unsqueeze(weights, dim=-2)
     
     beta = torch.inverse(x_transp @ x) @ x_transp @ y
-    return torch.transpose(beta, 0, 1)
+    return torch.transpose(beta, -1, -2)
 
 
 def divide_no_nan(x, y):
