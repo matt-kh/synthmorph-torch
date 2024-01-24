@@ -8,6 +8,17 @@ from torch.distributions.normal import Normal
 from . import layers
 from . import utils
 
+
+def torch_to_tf(inp: torch.Tensor):
+    indices = np.arange(inp.ndim)
+    return inp.permute(0, *indices[2:], 1)
+
+
+def tf_to_torch(inp: torch.Tensor): 
+    indices = np.arange(inp.ndim)
+    return inp.permute(0, -1, *indices[1:-1])
+
+
 def kaiming_init(
     module: nn.Module,
     a: float = 0,
@@ -72,8 +83,9 @@ class ConvDropBlock(nn.Module):
         self.activation = nn.LeakyReLU(0.2)
 
     def forward(self, x):
-        out = self.main(x)
-        out = self.activation(out)
+        x = self.main(x)
+        x = self.dropout(x)
+        out = self.activation(x)
         return out
 
 class Unet(nn.Module):
@@ -223,8 +235,8 @@ class UnetAffine(nn.Module):
     """
 
     def __init__(self,
-                 inshape=None,
-                 infeats=None,
+                 inshape,
+                 infeats,
                  nb_features=None,
                  add_features = None,
                  nb_levels=None,
@@ -327,7 +339,7 @@ class UnetAffine(nn.Module):
 
         # now we take care of any remaining convolutions
         self.remaining = nn.ModuleList()
-        for _, nf in enumerate(final_convs):
+        for nf in final_convs:
             self.remaining.append(ConvDropBlock(ndims, prev_nf, nf))
             prev_nf = nf
 
@@ -362,18 +374,24 @@ class VxmDense(nn.Module):
     VoxelMorph network for (unsupervised) nonlinear registration between two images.
     """
 
-    def __init__(self,
-                 inshape,
-                 nb_unet_features=None,
-                 nb_unet_levels=None,
-                 unet_feat_mult=1,
-                 nb_unet_conv_per_level=1,
-                 int_steps=7,
-                 int_resolution=2,
-                 bidir=False,
-                 use_probs=False,
-                 src_feats=1,
-                 trg_feats=1,):
+    def __init__(
+        self,
+        inshape,
+        nb_unet_features=None,
+        nb_unet_levels=None,
+        unet_feat_mult=1,
+        nb_unet_conv_per_level=1,
+        int_steps=7,
+        int_resolution=2,
+        bidir=False,
+        use_probs=False,
+        src_feats=1,
+        trg_feats=1,
+        input_model=None,
+        hyp_model=None,
+        fill_value=None,
+        reg_field='preintegrated',
+    ):
         """ 
         Parameters:
             inshape: Input shape. e.g. (192, 192, 192)
@@ -469,6 +487,7 @@ class VxmDense(nn.Module):
     
         # transform into flow field
         flow_field = self.flow(x)
+        flow_field = torch_to_tf(flow_field)    # subsequent operations use TF format
 
         # resize flow for integration
         pos_flow = flow_field
@@ -500,6 +519,10 @@ class VxmDense(nn.Module):
             'flow': pos_flow,
         }
 
+        for k, v in results.items():
+            if v is not None:
+                results[k] = tf_to_torch(v)
+
         return results
 
 
@@ -519,15 +542,12 @@ class VxmAffineFeatureDetector(nn.Module):
         in_shape=None,
         input_model=None,
         num_chan=1,
-         dropout=0,
+        dropout=0,
         num_feat=64,
         enc_nf=[256] * 4,
         dec_nf=[256] * 0,
         add_nf=[256] * 4,
         per_level=1,
-        unet_half_res=True,
-        src_feats=1,
-        trg_feats=1,
         half_res=True,
         weighted=True,
         rigid=False,
@@ -580,6 +600,15 @@ class VxmAffineFeatureDetector(nn.Module):
             return_feat: Append the output feature maps to the model outputs.
 
         """
+        self.half_res = half_res
+        self.weighted = weighted
+        self.rigid = rigid
+        self.make_dense = make_dense
+        self.bidir = bidir
+        self.return_trans_to_mid_space = return_trans_to_mid_space
+        self.return_trans_to_half_res = return_trans_to_half_res
+        self.return_moved = return_moved
+        self.return_feat = return_feat
         super().__init__()
 
         # Dimensions
@@ -588,76 +617,25 @@ class VxmAffineFeatureDetector(nn.Module):
         ndims = len(shape_full)
         assert ndims in (2, 3), 'only 2D and 3D supported'
         assert not return_trans_to_half_res or half_res, 'only for `half_res=True`'
-        
+    
+        dtype = torch.get_default_dtype()
+        self.out_keys = ["aff_1", "aff_2"]
+        if return_moved:
+            self.out_keys.extend(["mov_1", "mov_2"])
+        if return_feat:
+            self.out_keys.extend(["feat_1, feat2"])
+
         # Layers
         conv = getattr(nn, f'Conv{ndims}d')
-        maxpool = getattr(nn, f'MaxPool{ndims}d')
-        
-        dtype = torch.get_default_dtype()
-
-        self.halfres_st = layers.SpatialTransformer(fill_value=0, shape=shape_half, shift_center=False)
+        self.halfres_st = layers.SpatialTransformer(fill_value=0, shape=shape_half, shift_center=False) if half_res else None
         self.det = UnetAffine(
-            inshape=shape_full,
-            infeats=(src_feats + trg_feats),
+            inshape=shape_half if self.half_res else shape_full,
+            infeats=num_chan,
             nb_features=[enc_nf, dec_nf],
             add_features=add_nf,
             nb_conv_per_level=per_level,
-            half_res=unet_half_res,
+            half_res=half_res,
         )
-
-        # # Downsampling and upsampling operations
-        # maxpool_scale = [2] * len(enc_nf)
-        # self.pooling = [maxpool(kernel_size=ms, dtype=torch.float32) for ms in maxpool_scale]
-        # self.upsampling = [nn.Upsample(scale_factor=ms, mode='nearest') for ms in maxpool_scale]
-
-        # # Feature detector: encoder.
-        # prev_nf = num_chan
-        # self.encoder = nn.ModuleList()
-        # for nf in enc_nf:
-        #     blocks = nn.ModuleList()
-        #     for _ in range(per_level):
-        #         blocks.append(
-        #             ConvDropBlock(
-        #                 ndims=ndims, 
-        #                 in_channels=prev_nf, 
-        #                 out_channels=nf, 
-        #                 dropout=dropout
-        #             )
-        #         )
-        #         prev_nf = nf
-        #     self.encoder.append(blocks)
-
-        # # Feature detector: decoder
-        # self.decoder = nn.ModuleList()
-        # for nf in dec_nf:
-        #     blocks = nn.ModuleList()
-        #     for _ in range(per_level):
-        #         blocks.append(
-        #             ConvDropBlock(
-        #                 ndims=ndims, 
-        #                 in_channels=prev_nf, 
-        #                 out_channels=nf, 
-        #                 dropout=dropout
-        #             )
-        #         )
-        #         prev_nf = nf
-        #     self.decoder.append(blocks)
-        
-        # # Additional convolutions
-        # self.remaining = nn.ModuleList()
-        # for nf in add_nf:
-        #     self.remaining.append(
-        #         ConvDropBlock(
-        #             ndims=ndims, 
-        #             in_channels=prev_nf, 
-        #             out_channels=nf, 
-        #             dropout=dropout
-        #         )
-        #     )
-        #     prev_nf = nf
-        
-        # self.det = nn.ModuleList(self.encoder + self.decoder + self.remaining)
-
 
         # Output features
         self.out = nn.ModuleList()
@@ -666,12 +644,12 @@ class VxmAffineFeatureDetector(nn.Module):
 
         self.com = layers.CenterOfMass(axes=range(1, ndims + 1), normalize=True, shift_center=True, dtype=dtype)
         self.ls_fit = layers.LeastSquaresFit()
-        self.params_to_aff = layers.ParamsToAffineMatrix(ndims=ndims)
+        self.params_to_aff = layers.ParamsToAffineMatrix(ndims=ndims) if rigid else None
         self.compose = layers.ComposeTransform(shift_center=False)
         
         shape_out = shape_half if return_trans_to_half_res else shape_full
-        self.aff_to_dense = layers.AffineToDenseShift(shape_out, shift_center=False)
-        self.out_st = layers.SpatialTransformer(shift_center=False, fill_value=0, shape=shape_out)
+        self.aff_to_dense = layers.AffineToDenseShift(shape_out, shift_center=False) if make_dense else None
+        self.out_st = layers.SpatialTransformer(shift_center=False, fill_value=0, shape=shape_out) if return_moved else None
         
 
     def forward(self, source, target):
@@ -681,29 +659,107 @@ class VxmAffineFeatureDetector(nn.Module):
             target: Target image tensor.
             registration: Return integrated flow during inference. Default is False.
         """
-        x = torch.cat([source, target], dim=1)
-        x = self.det(x)
-        x = self.out(x)
+        source, target = [torch_to_tf(inp) for inp in (source, target)]     # convert to TF
+        ndims = len(source.shape) - 2
+        results = {key: None for key in self.out_keys}
 
-        return
+        if self.half_res:
+            scale = self._scale(ndims, source.shape, 2)
+            source = self.halfres_st([source, scale])
+            target = self.halfres_st([target, scale])
+
+        # Output features
+        source, target = [tf_to_torch(inp) for inp in (source, target)]     # convert to Torch
+        feat_arr = []
+        for x in [source, target]:
+            x = self.det(x)
+            for layer in self.out:
+                x = layer(x)
+            x = torch_to_tf(x)
+            feat_arr.append(x)
+        feat_source, feat_target = feat_arr
+
+        source, target = [torch_to_tf(inp) for inp in (source, target)]     # convert inputs back to TF
+
+        # Barycenter
+        shape_full = torch.as_tensor(source.shape[1:-1], device=source.device)
+        cen_arr = [self.com(feat) * shape_full for feat in feat_arr]
+        cen_source, cen_target = cen_arr
+
+        # Channel weights.
+        weights = None
+        if self.weighted:
+            axes = tuple(range(1, ndims + 1))
+            pow_source = torch.sum(feat_source, axis=axes)
+            pow_target = torch.sum(feat_target, axis=axes)
+            pow_source /= torch.sum(pow_source, axis=-1, keepdim=True)
+            pow_target /= torch.sum(pow_target, axis=-1, keepdim=True)
+            weights = pow_source * pow_target
+
+        # Least-squares fit and average, since the fit is not symmetric
+        aff_1 = self.ls_fit(cen_source, cen_target, weights)
+        aff_2 = self.ls_fit(cen_target, cen_source, weights)
+        aff_1 = 0.5 * (utils.invert_affine(aff_2) + aff_1)
+        # return aff_1
+        
+        # Remove scaling and shear
+        if self.rigid:
+            pass
+
+        # Mid-space. Before scaling at either side
+        if self.return_trans_to_mid_space:
+            pass
+
+        # Affine transform operating in index space, for full-resolution inputs.
+        # un_cen = self._un_cen(ndims, source.shape, shape_full)
+        # cen = self._cen(ndims, source.shape, shape_full)
+        # aff_1 = self.compose((un_cen, aff_1, cen))
+        # aff_2 = self.compose((un_cen, aff_2, cen))
+        out = [aff_1, aff_2]
+        # return aff_1
+
+        if self.return_trans_to_half_res:
+            pass
+        
+        if self.make_dense:
+            out = [self.aff_to_dense(x) for x in out]
+
+        results["aff_1"] = out[0]
+        results["aff_2"] = out[1]
+
+        # Additional outputs
+        if self.return_moved:
+            pass
+            
+        if self.return_feat:
+            results["feat_1"] = feat_source
+            results["feat_2"] = feat_target
+
+        results = {k: tf_to_torch(v) for k, v in results.items()}
+
+        if not self.bidir:
+            results = {k: results[k] for k in self.out_keys[::2]}
+        
+        return results
+    
     
     # Static transforms. Function names refer to effect on coordinates.
     def _tensor(self, x, shape, dtype=torch.float32):
         x = torch.tensor(x[None, :-1, :], dtype=dtype)
         return x.repeat(shape[0], 1, 1)
-
-    def _cen(self, ndims, shape):
-        mat = torch.eye(ndims + 1)
-        mat[:-1, -1] = -0.5 * (shape - 1)
-        return self._tensor(mat)
     
-    def _un_cen(self, ndims, shape):
+    def _cen(self, ndims, tensor_shape, mat_shape):
         mat = torch.eye(ndims + 1)
-        mat[:-1, -1] = +0.5 * (shape - 1)
-        return self._tensor(mat)
+        mat[:-1, -1] = -0.5 * (mat_shape - 1)
+        return self._tensor(mat, tensor_shape)
+    
+    def _un_cen(self, ndims, tensor_shape, mat_shape):
+        mat = torch.eye(ndims + 1)
+        mat[:-1, -1] = +0.5 * (mat_shape - 1)
+        return self._tensor(mat, tensor_shape)
 
-    def _scale(self, ndims, fact):
+    def _scale(self, ndims, tensor_shape, fact):
         mat = torch.diag(torch.tensor([fact] * ndims + [1.0]))
-        return self._tensor(mat)
+        return self._tensor(mat, tensor_shape)
 
     

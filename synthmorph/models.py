@@ -41,17 +41,19 @@ class SynthMorph(pl.LightningModule):
         self.lr = lr
     
     def training_step(self, batch):
-        fixed = batch['fixed']
         moving = batch['moving']
-        fixed_map = batch['fixed_map']
+        fixed = batch['fixed']
         moving_map = batch['moving_map']
+        fixed_map = batch['fixed_map']
 
         results = self.reg_model(moving, fixed)
 
         y_source, y_target, warp = results['y_source'], results['y_target'], results['flow']
-        pred = layers.SpatialTransformer(fill_value=0)([moving_map, warp])
+        pred = layers.SpatialTransformer(fill_value=0)([torch_to_tf(moving_map), torch_to_tf(warp)])
+        pred = tf_to_torch(pred)
         dice_loss = self.dice_loss.loss(fixed_map, pred) + 1.
         grad_loss = self.l2_loss.loss(None, warp)
+    
         self.log_dict(
             dictionary={
                 'dice_loss': dice_loss, 
@@ -85,25 +87,23 @@ class SynthMorphAffine(pl.LightningModule):
     def __init__(
         self,
         vol_size,
-        num_labels,
-        enc_nf,
-        dec_nf,
-        add_nf,
+        enc_nf=[256] * 4,
+        dec_nf=[256] * 0,
+        add_nf=[256] * 4,
         lr=1e-4,
         reg_weights=None,
-       
+        **kwargs
     ):
-        super().__init__()
+        super().__init__(**kwargs)
         self.save_hyperparameters()
         self.vol_size = vol_size
-        self.num_labels = num_labels
         self.reg_model = VxmAffineFeatureDetector(
             in_shape=vol_size,
             enc_nf=enc_nf,
             dec_nf=dec_nf,
             add_nf=add_nf,
-            unet_half_res=True,
         )
+        self.transformer = layers.SpatialTransformer(fill_value=0)
         if reg_weights is not None:
             self.reg_model.load_state_dict(torch.load(reg_weights))   # .pth file
 
@@ -111,37 +111,35 @@ class SynthMorphAffine(pl.LightningModule):
         self.lr = lr
     
     def training_step(self, batch):
-        fixed = batch['fixed']
         moving = batch['moving']
-        fixed_map = batch['fixed_map']
+        fixed = batch['fixed']
         moving_map = batch['moving_map']
+        fixed_map = batch['fixed_map']
 
         results = self.reg_model(moving, fixed)
 
-        y_source, y_target, warp = results['y_source'], results['y_target'], results['flow']
-        pred = layers.SpatialTransformer(fill_value=0)([moving_map, warp])
-        dice_loss = self.dice_loss.loss(fixed_map, pred) + 1.
-        grad_loss = self.l2_loss.loss(None, warp)
+        trans = results['aff_1']
+        pred = self.transformer([torch_to_tf(moving_map), torch_to_tf(trans)])
+        mse_loss = self.mse_loss.loss(fixed_map, pred)
+    
         self.log_dict(
             dictionary={
-                'dice_loss': dice_loss, 
-                'grad_loss': grad_loss,
-                'total_loss': dice_loss + grad_loss
+                'mse_loss': mse_loss
             }, 
             on_epoch=True,
             on_step=False, 
             prog_bar=True,
         )
 
-        return dice_loss + grad_loss
+        return mse_loss
     
     
     def predict_step(self, moving, fixed):
         results = self.reg_model(moving, fixed)
-        flow = results["flow"]
-        moved = results["y_source"]
-        return moved, flow
-
+        trans = results["aff_1"]
+        moved = self.transformer([torch_to_tf(moving), torch_to_tf(trans)])
+        moved = tf_to_torch(moved)
+        return moved, trans
     
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
