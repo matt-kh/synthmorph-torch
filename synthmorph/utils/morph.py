@@ -220,11 +220,11 @@ def affine_to_dense_shift(matrix, shape,
             warp_right = torch.as_tensor(warp_right, dtype=matrix.dtype)
         flat_shape = torch.cat((torch.as_tensor(warp_right.shape[:-1 - ndims]), (-1, ndims)), axis=0)
         warp_right = torch.reshape(warp_right, flat_shape)  # ... x nb_voxels x N
-        out += torch.transpose(warp_right, -1, -2)    # ... x N x nb_voxels
+        out += torch.transpose(warp_right, -1, -2).contiguous()   # ... x N x nb_voxels
 
     # Compute locations, subtract grid to obtain shift
     out = matrix[..., :ndims, :-1] @ out + matrix[..., :ndims, -1:]     # ... x N x nb_voxels
-    out = torch.transpose(out - mesh, -1, -2)
+    out = torch.transpose(out - mesh, -1, -2).contiguous()
   
     # Restore shape
     shape = np.concatenate((tuple(matrix.shape[:-2]), (*shape, ndims)), axis=0)
@@ -1264,7 +1264,7 @@ def fit_affine(x_source: torch.Tensor, x_target: torch.Tensor, weights: torch.Te
     shape = np.concatenate((x_target.shape[:-1], [1]), axis=0)
     ones = torch.ones(size=tuple(shape), dtype=x_target.dtype)
     x = torch.cat((x_target, ones), dim=-1)
-    x_transp = torch.transpose(x, -1, -2)
+    x_transp = torch.transpose(x, -1, -2).contiguous()
     y = x_source
 
     if weights is not None:
@@ -1272,7 +1272,7 @@ def fit_affine(x_source: torch.Tensor, x_target: torch.Tensor, weights: torch.Te
             weights = weights[..., 0]
         x_transp *= torch.unsqueeze(weights, dim=-2)
     
-    beta = torch.inverse(x_transp @ x) @ x_transp @ y
+    beta = torch.linalg.solve(x_transp @ x, x_transp) @ y
     return torch.transpose(beta, -1, -2)
 
 
