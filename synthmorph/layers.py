@@ -394,6 +394,7 @@ class ComposeTransform(nn.Module):
         if len(transforms) == 1:
             return transforms[0]
 
+        # Find a way to vectorize this without installing new packages
         composed = []
         batch_size = transforms[0].shape[0]
         for b in range(batch_size):

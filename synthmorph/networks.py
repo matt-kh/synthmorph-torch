@@ -296,7 +296,7 @@ class UnetAffine(nn.Module):
             final_convs = dec_nf + add_features
             dec_nf = []
         else:
-            final_convs = dec_nf[nb_dec_convs:]
+            final_convs = dec_nf[nb_dec_convs:] + add_features
             dec_nf = dec_nf[:nb_dec_convs]
 
         self.nb_enc_levels = int(nb_enc_convs / nb_conv_per_level) + 1
@@ -661,13 +661,15 @@ class VxmAffineFeatureDetector(nn.Module):
         """
         source, target = [torch_to_tf(inp) for inp in (source, target)]     # convert to TF
         ndims = len(source.shape) - 2
+        batch_size = source.shape[0]
         results = {key: None for key in self.out_keys}
 
         if self.half_res:
-            scale = self._scale(ndims, source.shape, 2)
+            scale = self._scale(ndims, batch_size, 2)
             source = self.halfres_st([source, scale])
             target = self.halfres_st([target, scale])
-
+            if torch.isnan(source).any() or torch.isnan(target).any():
+                print(f"NaN values detected in halfres")
         # Output features
         source, target = [tf_to_torch(inp) for inp in (source, target)]     # convert to Torch
         feat_arr = []
@@ -676,15 +678,21 @@ class VxmAffineFeatureDetector(nn.Module):
             for layer in self.out:
                 x = layer(x)
             x = torch_to_tf(x)
+            if torch.isnan(x).any():
+                print(f"NaN values detected in encoder")
             feat_arr.append(x)
         feat_source, feat_target = feat_arr
-
+        # return feat_arr
         source, target = [torch_to_tf(inp) for inp in (source, target)]     # convert inputs back to TF
 
         # Barycenter
         shape_full = torch.as_tensor(source.shape[1:-1], device=source.device)
         cen_arr = [self.com(feat) * shape_full for feat in feat_arr]
         cen_source, cen_target = cen_arr
+        if torch.isnan(cen_source).any() or torch.isnan(cen_target).any():
+                print(f"NaN values detected in barycenter")
+
+        # return cen_arr
 
         # Channel weights.
         weights = None
@@ -700,6 +708,8 @@ class VxmAffineFeatureDetector(nn.Module):
         aff_1 = self.ls_fit(cen_source, cen_target, weights)
         aff_2 = self.ls_fit(cen_target, cen_source, weights)
         aff_1 = 0.5 * (utils.invert_affine(aff_2) + aff_1)
+        if torch.isnan(aff_1).any() or torch.isnan(aff_2).any():
+                print(f"NaN values detected in WLS")
         # return aff_1
         
         # Remove scaling and shear
@@ -711,11 +721,13 @@ class VxmAffineFeatureDetector(nn.Module):
             pass
 
         # Affine transform operating in index space, for full-resolution inputs.
-        # un_cen = self._un_cen(ndims, source.shape, shape_full)
-        # cen = self._cen(ndims, source.shape, shape_full)
-        # aff_1 = self.compose((un_cen, aff_1, cen))
-        # aff_2 = self.compose((un_cen, aff_2, cen))
+        un_cen = self._un_cen(ndims, batch_size, shape_full)
+        cen = self._cen(ndims, batch_size, shape_full)
+        aff_1 = self.compose((un_cen, aff_1, cen))
+        aff_2 = self.compose((un_cen, aff_2, cen))
         out = [aff_1, aff_2]
+        if torch.isnan(aff_1).any() or torch.isnan(aff_2).any():
+                print(f"NaN values detected in compose")
         # return aff_1
 
         if self.return_trans_to_half_res:
@@ -735,7 +747,7 @@ class VxmAffineFeatureDetector(nn.Module):
             results["feat_1"] = feat_source
             results["feat_2"] = feat_target
 
-        results = {k: tf_to_torch(v) for k, v in results.items()}
+        results = {k: tf_to_torch(v) for k, v in results.items()}   # return torch tensors
 
         if not self.bidir:
             results = {k: results[k] for k in self.out_keys[::2]}
@@ -744,22 +756,22 @@ class VxmAffineFeatureDetector(nn.Module):
     
     
     # Static transforms. Function names refer to effect on coordinates.
-    def _tensor(self, x, shape, dtype=torch.float32):
-        x = torch.tensor(x[None, :-1, :], dtype=dtype)
-        return x.repeat(shape[0], 1, 1)
+    def _tensor(self, x, bsize, dtype=torch.float32):
+        x = x[None, :-1, :].to(dtype=dtype)
+        return x.repeat(bsize, 1, 1) # repeat based on batch size
     
-    def _cen(self, ndims, tensor_shape, mat_shape):
+    def _cen(self, ndims, bsize, mat_shape):
         mat = torch.eye(ndims + 1)
         mat[:-1, -1] = -0.5 * (mat_shape - 1)
-        return self._tensor(mat, tensor_shape)
+        return self._tensor(mat, bsize)
     
-    def _un_cen(self, ndims, tensor_shape, mat_shape):
+    def _un_cen(self, ndims, bsize, mat_shape):
         mat = torch.eye(ndims + 1)
         mat[:-1, -1] = +0.5 * (mat_shape - 1)
-        return self._tensor(mat, tensor_shape)
+        return self._tensor(mat, bsize)
 
-    def _scale(self, ndims, tensor_shape, fact):
+    def _scale(self, ndims, bsize, fact):
         mat = torch.diag(torch.tensor([fact] * ndims + [1.0]))
-        return self._tensor(mat, tensor_shape)
+        return self._tensor(mat, bsize)
 
     

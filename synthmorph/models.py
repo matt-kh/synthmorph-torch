@@ -115,19 +115,23 @@ class SynthMorphAffine(pl.LightningModule):
         fixed = batch['fixed']
         moving_map = batch['moving_map']
         fixed_map = batch['fixed_map']
-
         results = self.reg_model(moving, fixed)
-
         trans = results['aff_1']
+        # if torch.isnan(trans).any():
+        #     print(f"NaN values detected in the trans.")
         pred = self.transformer([torch_to_tf(moving_map), torch_to_tf(trans)])
+        pred = tf_to_torch(pred)
         mse_loss = self.mse_loss.loss(fixed_map, pred)
+        # if torch.isnan(mse_loss).any():
+        #     print(f"NaN values detected in the mse.")
+
     
         self.log_dict(
             dictionary={
                 'mse_loss': mse_loss
             }, 
             on_epoch=True,
-            on_step=False, 
+            on_step=True, 
             prog_bar=True,
         )
 

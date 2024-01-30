@@ -638,7 +638,7 @@ class SMShapesDataset(Dataset):
             )
             label_unique = len(label_map.unique())
             
-            return label_map
+        return label_map
     
     def prepare_data(self):
         pass
