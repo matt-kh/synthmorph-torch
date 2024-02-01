@@ -382,6 +382,7 @@ class VxmDense(nn.Module):
         unet_feat_mult=1,
         nb_unet_conv_per_level=1,
         int_steps=7,
+        svf_resolution=1,
         int_resolution=2,
         bidir=False,
         use_probs=False,
@@ -424,7 +425,7 @@ class VxmDense(nn.Module):
         assert ndims in [1, 2, 3], 'ndims should be one of 1, 2, or 3. found: %d' % ndims
 
         # configure core unet model
-        unet_half_res = True if int_resolution == 2 else False
+        unet_half_res = True if svf_resolution == 2 else False
         self.unet_model = Unet(
             inshape,
             infeats=(src_feats + trg_feats),
@@ -449,12 +450,10 @@ class VxmDense(nn.Module):
                 'Flow variance has not been implemented in pytorch - set use_probs to False')
 
         # configure optional resize layers (downsize)
+        self.resize = None
         if int_steps > 0 and int_resolution > 1:
-            # self.resize = layers.ResizeTransform(int_resolution, ndims)
-            self.resize = layers.RescaleTransform(1 / int_resolution)
-            
-        else:
-            self.resize = None
+            if int_resolution != svf_resolution:
+                self.resize = layers.RescaleTransform(1 / int_resolution)
 
         # configure bidirectional training
         self.bidir = bidir
@@ -484,7 +483,8 @@ class VxmDense(nn.Module):
         # concatenate inputs and propagate unet
         x = torch.cat([source, target], dim=1)
         x = self.unet_model(x)
-    
+
+        source, target = torch_to_tf(source), torch_to_tf(target)
         # transform into flow field
         flow_field = self.flow(x)
         flow_field = torch_to_tf(flow_field)    # subsequent operations use TF format
@@ -502,7 +502,6 @@ class VxmDense(nn.Module):
         if self.integrate:
             pos_flow = self.integrate(pos_flow)
             neg_flow = self.integrate(neg_flow) if self.bidir else None
-
             # resize to final resolution
             if self.fullsize:
                 pos_flow = self.fullsize(pos_flow)
@@ -519,6 +518,7 @@ class VxmDense(nn.Module):
             'flow': pos_flow,
         }
 
+        # Convert back to torch tensor format
         for k, v in results.items():
             if v is not None:
                 results[k] = tf_to_torch(v)
@@ -556,7 +556,8 @@ class VxmAffineFeatureDetector(nn.Module):
         return_trans_to_mid_space=False,
         return_trans_to_half_res=False,
         return_moved=False,
-        return_feat=False
+        return_feat=False,
+        return_keypoints=True
     ) -> None:
         """
         Internally, the model computes transforms in a centered frame at full resolution. However,
@@ -598,16 +599,18 @@ class VxmAffineFeatureDetector(nn.Module):
                 output images at half resolution. You can change this option after training.
             return_moved: Append the transformed images to the model outputs.
             return_feat: Append the output feature maps to the model outputs.
+            return_keypoints: Append the output keypoints(i.e. center of mass) to the model outputs.
+
 
         """
         self.half_res = half_res
         self.weighted = weighted
         self.rigid = rigid
-        self.make_dense = make_dense
         self.bidir = bidir
         self.return_trans_to_mid_space = return_trans_to_mid_space
         self.return_trans_to_half_res = return_trans_to_half_res
         self.return_moved = return_moved
+        self.return_keypoints = return_keypoints
         self.return_feat = return_feat
         super().__init__()
 
@@ -619,11 +622,6 @@ class VxmAffineFeatureDetector(nn.Module):
         assert not return_trans_to_half_res or half_res, 'only for `half_res=True`'
     
         dtype = torch.get_default_dtype()
-        self.out_keys = ["aff_1", "aff_2"]
-        if return_moved:
-            self.out_keys.extend(["mov_1", "mov_2"])
-        if return_feat:
-            self.out_keys.extend(["feat_1, feat2"])
 
         # Layers
         conv = getattr(nn, f'Conv{ndims}d')
@@ -642,13 +640,13 @@ class VxmAffineFeatureDetector(nn.Module):
         self.out.append(conv(self.det.final_nf, num_feat, kernel_size=3, padding='same'))
         self.out.append(nn.ReLU())
 
-        self.com = layers.CenterOfMass(axes=range(1, ndims + 1), normalize=True, shift_center=True, dtype=dtype)
+        self.com = layers.CenterOfMass(axes=range(1, ndims + 1), normalize=True, shift_center=True, dtype=dtype)   # change shift center to True
         self.ls_fit = layers.LeastSquaresFit()
         self.params_to_aff = layers.ParamsToAffineMatrix(ndims=ndims) if rigid else None
         self.compose = layers.ComposeTransform(shift_center=False)
         
         shape_out = shape_half if return_trans_to_half_res else shape_full
-        self.aff_to_dense = layers.AffineToDenseShift(shape_out, shift_center=False) if make_dense else None
+        self.make_dense = layers.AffineToDenseShift(shape_out, shift_center=False) if make_dense else None
         self.out_st = layers.SpatialTransformer(shift_center=False, fill_value=0, shape=shape_out) if return_moved else None
         
 
@@ -662,7 +660,7 @@ class VxmAffineFeatureDetector(nn.Module):
         source, target = [torch_to_tf(inp) for inp in (source, target)]     # convert to TF
         ndims = len(source.shape) - 2
         batch_size = source.shape[0]
-        results = {key: None for key in self.out_keys}
+        results = {}
 
         if self.half_res:
             scale = self._scale(ndims, batch_size, 2)
@@ -682,7 +680,6 @@ class VxmAffineFeatureDetector(nn.Module):
                 print(f"NaN values detected in encoder")
             feat_arr.append(x)
         feat_source, feat_target = feat_arr
-        # return feat_arr
         source, target = [torch_to_tf(inp) for inp in (source, target)]     # convert inputs back to TF
 
         # Barycenter
@@ -691,8 +688,6 @@ class VxmAffineFeatureDetector(nn.Module):
         cen_source, cen_target = cen_arr
         if torch.isnan(cen_source).any() or torch.isnan(cen_target).any():
                 print(f"NaN values detected in barycenter")
-
-        # return cen_arr
 
         # Channel weights.
         weights = None
@@ -710,7 +705,6 @@ class VxmAffineFeatureDetector(nn.Module):
         aff_1 = 0.5 * (utils.invert_affine(aff_2) + aff_1)
         if torch.isnan(aff_1).any() or torch.isnan(aff_2).any():
                 print(f"NaN values detected in WLS")
-        # return aff_1
         
         # Remove scaling and shear
         if self.rigid:
@@ -728,13 +722,12 @@ class VxmAffineFeatureDetector(nn.Module):
         out = [aff_1, aff_2]
         if torch.isnan(aff_1).any() or torch.isnan(aff_2).any():
                 print(f"NaN values detected in compose")
-        # return aff_1
 
         if self.return_trans_to_half_res:
             pass
         
         if self.make_dense:
-            out = [self.aff_to_dense(x) for x in out]
+            out = [self.make_dense(x) for x in out]
 
         results["aff_1"] = out[0]
         results["aff_2"] = out[1]
@@ -746,11 +739,15 @@ class VxmAffineFeatureDetector(nn.Module):
         if self.return_feat:
             results["feat_1"] = feat_source
             results["feat_2"] = feat_target
+        
+        if self.return_keypoints:
+            results["com_1"] = cen_arr[0]
+            results["com_2"] = cen_arr[1]
 
         results = {k: tf_to_torch(v) for k, v in results.items()}   # return torch tensors
 
         if not self.bidir:
-            results = {k: results[k] for k in self.out_keys[::2]}
+            results = {k: results[k] for k in list(results.keys())[::2]}
         
         return results
     

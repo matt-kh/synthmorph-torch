@@ -13,6 +13,7 @@ class SynthMorph(pl.LightningModule):
         enc_nf,
         dec_nf,
         int_steps=7,
+        svf_resolution=2,
         int_resolution=2,
         bidir=False,
         lmd=1,
@@ -28,6 +29,7 @@ class SynthMorph(pl.LightningModule):
             inshape=vol_size,
             nb_unet_features=[enc_nf, dec_nf],
             int_steps=int_steps,
+            svf_resolution=svf_resolution,
             int_resolution=int_resolution,
             bidir=bidir,
         )
@@ -50,7 +52,7 @@ class SynthMorph(pl.LightningModule):
 
         y_source, y_target, warp = results['y_source'], results['y_target'], results['flow']
         pred = layers.SpatialTransformer(fill_value=0)([torch_to_tf(moving_map), torch_to_tf(warp)])
-        pred = tf_to_torch(pred)
+        pred = tf_to_torch(pred.clip(0, 1).round())
         dice_loss = self.dice_loss.loss(fixed_map, pred) + 1.
         grad_loss = self.l2_loss.loss(None, warp)
     
@@ -102,6 +104,7 @@ class SynthMorphAffine(pl.LightningModule):
             enc_nf=enc_nf,
             dec_nf=dec_nf,
             add_nf=add_nf,
+            bidir=True  # remove later
         )
         self.transformer = layers.SpatialTransformer(fill_value=0)
         if reg_weights is not None:
@@ -120,7 +123,7 @@ class SynthMorphAffine(pl.LightningModule):
         # if torch.isnan(trans).any():
         #     print(f"NaN values detected in the trans.")
         pred = self.transformer([torch_to_tf(moving_map), torch_to_tf(trans)])
-        pred = tf_to_torch(pred)
+        pred = tf_to_torch(pred.clip(0, 1).round())
         mse_loss = self.mse_loss.loss(fixed_map, pred)
         # if torch.isnan(mse_loss).any():
         #     print(f"NaN values detected in the mse.")

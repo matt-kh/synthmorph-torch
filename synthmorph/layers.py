@@ -227,23 +227,26 @@ class RescaleTransform(nn.Module):
     """
     
     def __init__(self, zoom_factor, interp_method='linear', **kwargs):
+        """
+        Parameters:
+            zoom_factor: Scaling factor.
+            interp_method: Interpolation method. Must be 'linear' or 'nearest'.
+        """
         self.zoom_factor = zoom_factor
         self.interp_method = interp_method
-        self.built = False
         super().__init__(**kwargs)
     
     def build(self, input_shape):
-        if self.built:
-            return
         self.is_affine = utils.is_affine_shape(input_shape[1:])
         self.ndims = input_shape[-1] -1 if self.is_affine else input_shape[-1]
-        self.built = True
 
     def forward(self, transform):
         input_shape = transform.shape
         self.build(input_shape)
 
-        transform = transform.squeeze(0)    # remove batch if batch == 1
+        if transform.shape[0] == 1:
+            transform = transform.squeeze(0)    # remove batch if batch == 1
+
         out = None
         if self.is_affine:
             out = utils.rescale_affine(transform, self.zoom_factor)
