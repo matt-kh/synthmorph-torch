@@ -10,6 +10,7 @@ from tqdm import tqdm
 # local code
 from . import utils
 from . import layers
+from .networks import torch_to_tf, tf_to_torch
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -240,7 +241,7 @@ def labels_to_image(
     np_rng = np.random.default_rng(None)
     default_seed = lambda: np_rng.integers(np.iinfo(int).max).item()
     rng = lambda x: torch.Generator(device=device).manual_seed(x)
-    
+
     batch_size = 1
     num_dim = len(labels.shape)
     in_shape = labels.shape
@@ -251,7 +252,6 @@ def labels_to_image(
     # Add new axes, Torch format
     labels = labels.unsqueeze(0).unsqueeze(1)
     labels = labels.expand(batch_size, -1, *[-1] * num_dim)
-    labels_shape_indices = np.arange(len(labels.shape))
 
     # Transform labels into [0, 1, ..., N-1].
     labels = labels.to(dtype=torch.int32, device=device)
@@ -262,6 +262,9 @@ def labels_to_image(
     for i, lab in enumerate(in_label_list):
         in_lut[lab] = i
     labels = in_lut[labels] # tf.gather(in_lut, indices=labels)
+    labels = torch_to_tf(labels)  # TF format
+
+    # labels = torch.ones(labels.shape, device=device)        #remove later
 
     def_field = None
     vel_field = None
@@ -276,15 +279,17 @@ def labels_to_image(
         )
         # One per batch.
         vel_field = torch.stack([vel_draw() for _ in labels])
+        vel_field = torch_to_tf(vel_field)
         # Deformation field.
         def_field = layers.VecInt(int_steps=5)(vel_field)
         def_field = layers.RescaleValues(2)(def_field)
         def_field = layers.Resize(2, interp_method='linear')(def_field)
         # Resampling.
         labels = layers.SpatialTransformer(interp_method='nearest', fill_value=0)([labels, def_field])
-    
+
     # Affine transformations
     if affine_args is not None:
+        labels = tf_to_torch(labels)    # torchvision operates on torch format
         if not isinstance(affine_args, dict):
             warnings.warn("Argument affine_args must be a dictionary to apply affine transformations")
         rotate = affine_args.get("rotate", 0)
@@ -293,10 +298,9 @@ def labels_to_image(
         shear = affine_args.get("shear", None)
         aff_transformer = RandomAffine(degrees=rotate, translate=translate, scale=scale, shear=shear)
         labels = aff_transformer(labels)
-
+        labels = torch_to_tf(labels)
+    
     labels = labels.to(torch.int32)
-    labels = labels.permute(0, *labels_shape_indices[2:], 1)    # TF format
-
     # Intensity means and standard deviations for synthetic image
     if mean_min is None:
         mean_min = [0] + [25] * (num_in_labels - 1)
@@ -358,7 +362,7 @@ def labels_to_image(
             max_std=bias_std, device=device
         )
         bias_field = torch.stack([bias_draw() for _ in labels])
-        bias_field = bias_field.permute(0, *labels_shape_indices[2:], 1)   # TF format
+        bias_field = torch_to_tf(bias_field)  # TF format
         image *= torch.exp(bias_field)
 
     # Intensity manipulations.
@@ -374,7 +378,7 @@ def labels_to_image(
         offset = offset.uniform_(0, dc_offset, generator=rng(seeds.get('dc_offset', default_seed())))
         image += offset
 
-    image = image.permute(0, -1, *labels_shape_indices[1:-1])
+    image = tf_to_torch(image)
     
     # Lookup table for converting the index labels back to the original values,
     # setting unwanted labels to background. If the output labels are provided
@@ -404,7 +408,7 @@ def labels_to_image(
     labels = out_lut[labels]
     if one_hot:
         labels = nnf.one_hot(labels.to(torch.int64), num_classes=len(hot_label_list))
-        labels = labels.squeeze(-2).permute(0, -1, *labels_shape_indices[1:-1])
+        labels = tf_to_torch(labels.squeeze(-2))
 
     # Remove batch_size
     if vel_field is not None:
