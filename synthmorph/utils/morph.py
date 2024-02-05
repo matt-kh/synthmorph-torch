@@ -1235,7 +1235,7 @@ def draw_affine_params(
             prop.update(minval=-lim, maxval=lim)
 
 
-def fit_affine(x_source: torch.Tensor, x_target: torch.Tensor, weights: torch.Tensor=None):
+def fit_affine(x_source: torch.Tensor, x_target: torch.Tensor, weights: torch.Tensor=None, lmd=1e-05):
     """Fit an affine transform between two sets of corresponding points.
 
     Fit an N-dimensional affine transform between two sets of M corresponding
@@ -1272,7 +1272,9 @@ def fit_affine(x_source: torch.Tensor, x_target: torch.Tensor, weights: torch.Te
             weights = weights[..., 0]
         x_transp *= torch.unsqueeze(weights, dim=-2)
     
-    beta = torch.linalg.solve(x_transp @ x, x_transp) @ y
+    # Regularization, prevents singular matrix
+    xtx = x_transp @ x + lmd * torch.eye(x.shape[-1])
+    beta = torch.linalg.solve(xtx, x_transp) @ y
     return torch.transpose(beta, -1, -2)
 
 
