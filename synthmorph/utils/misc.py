@@ -55,6 +55,45 @@ def plot_array_row(array_row, headers, cmap='gray'):
 
     plt.tight_layout()
     plt.show()
+
+
+def plot_keypoints(keypoints, headers, xlim=None, ylim=None):
+    """
+    Plot keypoints and corresponding headers in subplots.
+
+    Parameters:
+    - keypoints: List of keypoints with shape (2, x)
+    - headers: List of headers corresponding to each subplot
+    - xlim: Tuple specifying the x-axis limits, e.g., (min_value, max_value)
+    - ylim: Tuple specifying the y-axis limits, e.g., (min_value, max_value)
+
+    Returns:
+    - None
+    """
+    num_subplots = len(headers)
+    
+    fig, axs = plt.subplots(1, num_subplots, figsize=(4 * num_subplots, 4))
+
+    for i in range(num_subplots):
+        # Plot keypoints for each subplot
+        axs[i].scatter(keypoints[i][0, :], keypoints[i][1, :], marker='x', color='b')
+
+        # Set subplot labels and title
+        axs[i].set_xlabel('X-axis')
+        axs[i].set_ylabel('Y-axis')
+        axs[i].set_title(headers[i])
+
+        # Set axis limits if provided
+        if xlim:
+            axs[i].set_xlim(xlim[0], xlim[1])
+        if ylim:
+            axs[i].set_ylim(ylim[0], ylim[1])
+
+    # Adjust layout for better spacing
+    plt.tight_layout()
+
+    # Show the plot
+    plt.show()
     
     
 def convert_to_single_rgb(grayscale_image, channel='red'):
@@ -80,8 +119,8 @@ def rotate(image, angle):
 def superimpose_circles(
     image, 
     pixel_value=255, 
-    size_range=(2, 4), 
-    dist_range=(50, 81), 
+    size_range=(0.05, 0.05), 
+    dist_range=(50, 51), 
     rotate=0,
     x_shift = 0,
     y_shift=0,

@@ -59,11 +59,28 @@ class Dice:
         return -dice
 
 
-def divide_no_nan(x, y):
-    # Create a mask to handle division by zero or NaN in y
-    mask = (y != 0) & ~torch.isnan(y)
+class MSE:
+    """
+    Sigma-weighted mean squared error for image reconstruction.
+    """
+
+    def __init__(self, image_sigma=1.0) -> None:
+        self.image_sigma = image_sigma
+
+    def mse(self, y_true, y_pred):
+        return torch.square(y_true - y_pred)
     
-    # Perform the division only where the mask is True
-    result = torch.where(mask, x / y, torch.zeros_like(x))
-    
-    return result
+    def loss(self, y_true, y_pred, reduce='mean'):
+        # Compute mse
+        mse = self.mse(y_true, y_pred)
+        # Reduce
+        if reduce == 'mean':
+            mse = torch.mean(mse)
+        elif reduce == 'max':
+            mse = torch.max(mse)
+        elif reduce is not None:
+            raise ValueError(f"Unknown MSE reduction type: {reduce}, choose 'mean' or 'max'")
+        
+        return 1.0 / (self.image_sigma ** 2) * mse
+
+

@@ -7,6 +7,9 @@ artifacts/
 *.csv
 *.pth
 *.h5
+*.tar
+*.gz
+*.json
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
