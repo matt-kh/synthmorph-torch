@@ -2,8 +2,6 @@ import torch
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import pytorch_lightning as pl
 from torch.distributions.normal import Normal
 from . import layers
 from . import utils
@@ -369,6 +367,7 @@ class UnetAffine(nn.Module):
 
         return x
 
+
 class VxmDense(nn.Module):
     """
     VoxelMorph network for (unsupervised) nonlinear registration between two images.
@@ -695,8 +694,8 @@ class VxmAffineFeatureDetector(nn.Module):
             axes = tuple(range(1, ndims + 1))
             pow_source = torch.sum(feat_source, axis=axes)
             pow_target = torch.sum(feat_target, axis=axes)
-            pow_source /= torch.sum(pow_source, axis=-1, keepdim=True)
-            pow_target /= torch.sum(pow_target, axis=-1, keepdim=True)
+            pow_source /= torch.sum(pow_source, axis=-1, keepdim=True).clip(min=1e-05)
+            pow_target /= torch.sum(pow_target, axis=-1, keepdim=True).clip(min=1e-05)
             weights = pow_source * pow_target
 
         # Least-squares fit and average, since the fit is not symmetric
@@ -704,7 +703,7 @@ class VxmAffineFeatureDetector(nn.Module):
         aff_2 = self.ls_fit(cen_target, cen_source, weights)
         aff_1 = 0.5 * (utils.invert_affine(aff_2) + aff_1)
         if torch.isnan(aff_1).any() or torch.isnan(aff_2).any():
-                print(f"NaN values detected in WLS")
+                print(f"NaN values detected in WLS outputs")
         
         # Remove scaling and shear
         if self.rigid:
@@ -771,4 +770,47 @@ class VxmAffineFeatureDetector(nn.Module):
         mat = torch.diag(torch.tensor([fact] * ndims + [1.0]))
         return self._tensor(mat, bsize)
 
-    
+
+class HyperVxmJoint(nn.Module):
+    """
+    SynthMorph network for symmetric joint affine-deformable registration of two images.
+
+    To save memory, the registration runs at half resolution. We downsample full-resolution inputs
+    within this model to avoid resampling twice. The returned transforms apply to full-resolution
+    images. For efficient training, pass `return_trans_to_half_res=True` to return transforms from
+    full-resolution inputs to half-resolution outputs. Careful: this requires setting the adequate
+    output `shape` for `SpatialTransformer` when applying transforms. Concatenating matrices is
+    cheap but requires transforms operating on zero-based indices when changing resolution:
+    `shift_center=True` would un-shift by an incorrect offset - set it to `False` or suffer.
+
+    If you find this work useful, please cite:
+        Anatomy-aware and acquisition-agnostic joint registration with SynthMorph
+        M Hoffmann, A Hoopes, DN Greve, B Fischl*, AV Dalca* (*equal contribution)
+        arXiv preprint arXiv:2301.11329
+        https://doi.org/10.48550/arXiv.2301.11329
+
+    """
+    def __init__(
+        self,
+        in_shape=None,
+        input_model=None,
+        num_chan=1,
+        hyp_num=1,
+        hyp_units=[32] * 4,
+        enc_nf=[256] * 4,
+        dec_nf=[256] * 4,
+        add_nf=[256] * 4,
+        per_level=1,
+        int_steps=7,
+        bidir=False,
+        skip_affine=False,
+        mid_space=False,
+        return_trans_to_half_res=False,
+        return_tot=True,
+        return_def=False,
+        return_aff=False,
+        return_svf=False,
+        return_moved=False,
+        **kwargs
+    ):
+        super().__init__()
