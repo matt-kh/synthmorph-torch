@@ -8,3 +8,6 @@ prettytable
 jupyter
 git+https://github.com/adalca/neurite.git
 git+https://github.com/voxelmorph/voxelmorph.git
+# Misc
+nvitop
+gdown

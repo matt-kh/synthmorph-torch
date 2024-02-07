@@ -76,7 +76,7 @@ def plot_keypoints(keypoints, headers, xlim=None, ylim=None):
 
     for i in range(num_subplots):
         # Plot keypoints for each subplot
-        axs[i].scatter(keypoints[i][0, :], keypoints[i][1, :], marker='o', color='b')
+        axs[i].scatter(keypoints[i][0, :], keypoints[i][1, :], marker='x', color='b')
 
         # Set subplot labels and title
         axs[i].set_xlabel('X-axis')

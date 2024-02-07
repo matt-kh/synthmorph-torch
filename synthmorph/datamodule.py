@@ -633,7 +633,7 @@ class SMShapesDataset(Dataset):
         super().__init__(**kwargs)
 
     def _generate_label(self):
-        # Fix for number of unique values from generate_map not matcing num_labels
+        # Makes sure that the number of labels is correct
         label_unique = 0
         while label_unique != self.num_labels:
             label_map = generate_map(
@@ -651,7 +651,6 @@ class SMShapesDataset(Dataset):
         return self.size
 
     def __getitem__(self, index: int):
- 
         label = self.label_maps[index]
         if self.augment:    # axis flipping
             axes = self.rng.choice(self.num_dim, size=self.rng.integers(self.num_dim + 1), replace=False, shuffle=False)
@@ -665,13 +664,13 @@ class SMShapesDataset(Dataset):
         results = {
             "fixed": fixed_image.to(torch.float32),
             "moving": moving_image.to(torch.float32),
-            "fixed_map": fixed_map.to(torch.int64),
-            "moving_map": moving_map.to(torch.int64)
+            "fixed_map": fixed_map.to(torch.int32),
+            "moving_map": moving_map.to(torch.int32)
         }
         
         return results
 
-
+# WIP
 class SMSuperpointDataset(Dataset):
     def __init__(
         self,
@@ -717,6 +716,7 @@ class SMSuperpointDataset(Dataset):
         return self.size
     
     def __getitem__(self, index: int) -> dict:
+        variant = None 
         label = self._sample_variant(variant)
         if self.augment:    # axis flipping
             axes = self.rng.choice(self.num_dim, size=self.rng.integers(self.num_dim + 1), replace=False, shuffle=False)

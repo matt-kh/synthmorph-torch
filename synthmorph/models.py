@@ -4,7 +4,7 @@ import torch
 from .networks import *
 from .losses import *
 
-
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 class SynthMorph(pl.LightningModule):
     def __init__(
         self,
@@ -19,7 +19,7 @@ class SynthMorph(pl.LightningModule):
         lmd=1,
         lr=1e-4,
         reg_weights=None,
-       
+        device=device,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -33,6 +33,7 @@ class SynthMorph(pl.LightningModule):
             int_resolution=int_resolution,
             bidir=bidir,
         )
+        self.reg_model = self.reg_model.to(device=device)
         if reg_weights is not None:
             self.reg_model.load_state_dict(torch.load(reg_weights))   # .pth file
 
@@ -52,7 +53,7 @@ class SynthMorph(pl.LightningModule):
 
         y_source, y_target, warp = results['y_source'], results['y_target'], results['flow']
         pred = layers.SpatialTransformer(fill_value=0)([torch_to_tf(moving_map), torch_to_tf(warp)])
-        pred = tf_to_torch(pred.clip(0, 1).round())
+        pred = tf_to_torch(pred)
         dice_loss = self.dice_loss.loss(fixed_map, pred) + 1.
         grad_loss = self.l2_loss.loss(None, warp)
     
@@ -76,7 +77,6 @@ class SynthMorph(pl.LightningModule):
         moved = results["y_source"]
         return moved, flow
 
-    
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
         return optimizer
@@ -123,7 +123,7 @@ class SynthMorphAffine(pl.LightningModule):
         # if torch.isnan(trans).any():
         #     print(f"NaN values detected in the trans.")
         pred = self.transformer([torch_to_tf(moving_map), torch_to_tf(trans)])
-        pred = tf_to_torch(pred.clip(0, 1).round())
+        pred = tf_to_torch(pred)
         mse_loss = self.mse_loss.loss(fixed_map, pred)
         # if torch.isnan(mse_loss).any():
         #     print(f"NaN values detected in the mse.")
