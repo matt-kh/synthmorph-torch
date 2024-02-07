@@ -20,6 +20,6 @@ In your Python environment:
 pip install -r requirements.txt
 ```
 
-## Updates (1 Dec, 2023)
-
-- Data generation (both label map and image) uses  faithful Torch implementation instead of NumPy. It is also much faster now, especially with GPU.
+## Updates (7 February, 2024)
+- Implemented affine registration model (only for default parameters).
+- Implemented affine data generation.
